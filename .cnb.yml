@@ -1,99 +1,112 @@
 stable:
   push:
     - name: docker-build-and-push-amd64
+
       services:
         - docker
+
       docker:
         image: docker:24-git
+
+      env:
+        # Codex CLI 版本。
+        # latest：构建时安装 npm 上的最新版本。
+        # 也可以固定版本，例如：0.101.0
+        CODEX_VERSION: latest
+
       stages:
-        - name: Build & Push (amd64 only)
-          script:
-            - |
-              set -euo pipefail
+        - name: Build, Verify & Push Codex CLI (amd64)
+          script: |
+            set -euo pipefail
 
-              echo "===== ENV CHECK ====="
-              echo "CNB_DOCKER_REGISTRY=${CNB_DOCKER_REGISTRY:-}"
-              echo "CNB_REPO_SLUG_LOWERCASE=${CNB_REPO_SLUG_LOWERCASE:-}"
-              echo "CNB_COMMIT_SHORT=${CNB_COMMIT_SHORT:-}"
-              echo "CNB_TAG=${CNB_TAG:-}"
-              echo "====================="
+            echo "===== ENV CHECK ====="
+            echo "CNB_DOCKER_REGISTRY=${CNB_DOCKER_REGISTRY:-}"
+            echo "CNB_REPO_SLUG_LOWERCASE=${CNB_REPO_SLUG_LOWERCASE:-}"
+            echo "CNB_COMMIT_SHORT=${CNB_COMMIT_SHORT:-}"
+            echo "CNB_TAG=${CNB_TAG:-}"
+            echo "CODEX_VERSION=${CODEX_VERSION:-latest}"
+            echo "====================="
 
-              REGISTRY_IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+            # 检查 CNB 必需环境变量
+            : "${CNB_DOCKER_REGISTRY:?CNB_DOCKER_REGISTRY is required}"
+            : "${CNB_REPO_SLUG_LOWERCASE:?CNB_REPO_SLUG_LOWERCASE is required}"
+            : "${CNB_TOKEN:?CNB_TOKEN is required}"
 
-              if [ -n "${CNB_TAG:-}" ]; then
-                REF="${CNB_TAG}"
-              else
-                REF="${CNB_COMMIT_SHORT}"
-              fi
+            # 最终镜像仓库地址，例如：
+            # docker.cnb.cool/用户名/仓库名
+            REGISTRY_IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
 
-              IMAGE_LATEST="${REGISTRY_IMAGE}:latest"
-              IMAGE_AMD64="${REGISTRY_IMAGE}:amd64"
-              IMAGE_REF="${REGISTRY_IMAGE}:${REF}"
+            # 有 Git Tag 时使用 Tag，否则使用提交短哈希
+            if [ -n "${CNB_TAG:-}" ]; then
+              RAW_REF="${CNB_TAG}"
+            else
+              RAW_REF="${CNB_COMMIT_SHORT:-build}"
+            fi
 
-              echo "REGISTRY_IMAGE=${REGISTRY_IMAGE}"
-              echo "REF=${REF}"
+            # Docker Tag 不允许出现 /、空格等字符
+            REF="$(
+              printf '%s' "${RAW_REF}" |
+              sed 's/[^A-Za-z0-9_.-]/-/g' |
+              cut -c1-128
+            )"
 
-              docker login "${CNB_DOCKER_REGISTRY}" -u cnb -p "${CNB_TOKEN}"
+            if [ -z "${REF}" ]; then
+              REF="build"
+            fi
 
-              export DOCKER_BUILDKIT=1
-              export BUILDKIT_PROGRESS=plain
+            IMAGE_LATEST="${REGISTRY_IMAGE}:latest"
+            IMAGE_AMD64="${REGISTRY_IMAGE}:amd64"
+            IMAGE_REF="${REGISTRY_IMAGE}:${REF}"
 
-              echo "===== INSTALL BUILD TOOLS ====="
-              apk add --no-cache \
-                bash \
-                git \
-                curl \
-                tar \
-                build-base \
-                clang \
-                lld \
-                llvm \
-                musl-dev \
-                linux-headers
+            echo "===== IMAGE TAGS ====="
+            echo "IMAGE_LATEST=${IMAGE_LATEST}"
+            echo "IMAGE_AMD64=${IMAGE_AMD64}"
+            echo "IMAGE_REF=${IMAGE_REF}"
+            echo "======================"
 
-              echo "===== INSTALL GO 1.25.8 ====="
-              GO_VERSION="1.25.8"
-              ARCH="$(uname -m)"
-              case "${ARCH}" in
-                x86_64) GO_ARCH="amd64" ;;
-                aarch64) GO_ARCH="arm64" ;;
-                *) echo "Unsupported arch: ${ARCH}" && exit 1 ;;
-              esac
+            echo "===== DOCKER INFO ====="
+            docker version
+            docker info
 
-              rm -rf /usr/local/go
-              curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go.tgz
-              tar -C /usr/local -xzf /tmp/go.tgz
-              export PATH="/usr/local/go/bin:${PATH}"
+            echo "===== LOGIN CNB REGISTRY ====="
 
-              go version
+            printf '%s' "${CNB_TOKEN}" |
+              docker login \
+                "${CNB_DOCKER_REGISTRY}" \
+                --username "${CNB_TOKEN_USER_NAME:-cnb}" \
+                --password-stdin
 
-              echo "===== BUILD AMD64 BINARY ====="
-              VERSION="$(go run ./cmd/internal/read_tag)"
-              LDFLAGS_SHARED="$(cat release/LDFLAGS)"
-              BUILD_TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+            export DOCKER_BUILDKIT=1
+            export BUILDKIT_PROGRESS=plain
 
-              export GOOS=linux
-              export GOARCH=amd64
-              export CGO_ENABLED=0
+            echo "===== BUILD AMD64 IMAGE ====="
 
-              go build -v -trimpath -o sing-box-amd64 \
-                -tags "${BUILD_TAGS}" \
-                -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
-                ./cmd/sing-box
+            docker build \
+              --pull \
+              --platform linux/amd64 \
+              --progress=plain \
+              --build-arg "CODEX_VERSION=${CODEX_VERSION:-latest}" \
+              --tag "${IMAGE_LATEST}" \
+              --tag "${IMAGE_AMD64}" \
+              --tag "${IMAGE_REF}" \
+              --file Dockerfile \
+              .
 
-              chmod +x sing-box-amd64
-              ls -la sing-box-amd64
+            echo "===== VERIFY IMAGE ====="
 
-              echo "===== BUILD DOCKER IMAGE ====="
-              docker build --progress=plain \
-                --build-arg TARGETARCH=amd64 \
-                -f Dockerfile.binary \
-                -t "${IMAGE_LATEST}" \
-                -t "${IMAGE_AMD64}" \
-                -t "${IMAGE_REF}" \
-                .
+            docker image inspect "${IMAGE_REF}" \
+              --format 'Image={{.RepoTags}} OS/Arch={{.Os}}/{{.Architecture}}'
 
-              echo "===== PUSH DOCKER IMAGE ====="
-              docker push "${IMAGE_LATEST}"
-              docker push "${IMAGE_AMD64}"
-              # docker push "${IMAGE_REF}"
+            # 验证镜像中的 Codex CLI 可以正常运行
+            docker run --rm "${IMAGE_REF}" --version
+
+            echo "===== PUSH IMAGES ====="
+
+            docker push "${IMAGE_LATEST}"
+            docker push "${IMAGE_AMD64}"
+            docker push "${IMAGE_REF}"
+
+            echo "===== BUILD COMPLETE ====="
+            echo "docker pull ${IMAGE_LATEST}"
+            echo "docker pull ${IMAGE_AMD64}"
+            echo "docker pull ${IMAGE_REF}"
