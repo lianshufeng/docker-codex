@@ -1,4 +1,4 @@
-stable:
+master:
   push:
     - name: docker-build-and-push-amd64
 
