@@ -1,0 +1,6 @@
+# Docker 容器通常没有可用的系统钥匙串，明确使用 auth.json。
+cli_auth_credentials_store = "file"
+
+# 默认限制在挂载的工作区内写文件，并在敏感操作时询问。
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"

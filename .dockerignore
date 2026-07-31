@@ -1,0 +1,7 @@
+.git
+.env
+codex-home
+secrets
+workspace
+node_modules
+*.log

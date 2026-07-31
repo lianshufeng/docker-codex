@@ -1,0 +1,17 @@
+# OpenAI-compatible 中转/API 网关示例。
+# 1. 修改 base_url。
+# 2. 修改 model 为中转实际支持的模型。
+# 3. 在项目根目录 .env 中填写 RELAY_API_KEY。
+# 4. 中转必须兼容 Codex 使用的 Responses API。
+
+cli_auth_credentials_store = "file"
+model = "gpt-5.4"
+model_provider = "relay"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[model_providers.relay]
+name = "OpenAI-compatible relay"
+base_url = "https://relay.example.com/v1"
+env_key = "RELAY_API_KEY"
+wire_api = "responses"

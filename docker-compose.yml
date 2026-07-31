@@ -1,0 +1,30 @@
+# 当前 Docker Compose 推荐格式：不需要 version: "3.8"
+name: codex-cli
+
+services:
+  codex:
+    build:
+      context: .
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-latest}
+
+    image: local/codex-cli:${CODEX_VERSION:-latest}
+
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+
+    environment:
+      HOME: /home/node
+      CODEX_HOME: /home/node/.codex
+      TERM: ${TERM:-xterm-256color}
+
+    volumes:
+      # 需要 Codex 操作的项目代码
+      - ${WORKSPACE_DIR:-./workspace}:/workspace
+
+      # 保存 auth.json、config.toml、历史记录等
+      - ${CODEX_HOME_DIR:-./codex-home}:/home/node/.codex
+
+      # 挂载用户级技能
+      - ${CODEX_SKILLS_DIR:-./skills}:/home/node/.agents/skills:ro

@@ -1,0 +1,12 @@
+.env
+
+# auth.json、历史、日志、缓存均可能包含敏感信息。
+codex-home/*
+!codex-home/config.toml
+
+# 单文件凭据挂载目录。
+secrets/
+
+# 示例工作目录中的实际项目通常单独管理版本。
+workspace/*
+!workspace/.gitkeep
