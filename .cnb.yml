@@ -88,7 +88,6 @@ master:
               --build-arg "CODEX_VERSION=${CODEX_VERSION:-latest}" \
               --tag "${IMAGE_LATEST}" \
               --tag "${IMAGE_AMD64}" \
-              --tag "${IMAGE_REF}" \
               --file Dockerfile \
               .
 
@@ -103,10 +102,8 @@ master:
             echo "===== PUSH IMAGES ====="
 
             docker push "${IMAGE_LATEST}"
-            docker push "${IMAGE_AMD64}"
-            docker push "${IMAGE_REF}"
+            docker push "${IMAGE_AMD64}"         
 
             echo "===== BUILD COMPLETE ====="
             echo "docker pull ${IMAGE_LATEST}"
             echo "docker pull ${IMAGE_AMD64}"
-            echo "docker pull ${IMAGE_REF}"
