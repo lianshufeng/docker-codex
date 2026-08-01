@@ -3,13 +3,7 @@ name: codex-cli
 
 services:
   codex:
-    build:
-      context: .
-      args:
-        CODEX_VERSION: ${CODEX_VERSION:-latest}
-
-    image: local/codex-cli:${CODEX_VERSION:-latest}
-
+    image: docker.cnb.cool/vvllm/codex
     working_dir: /workspace
     stdin_open: true
     tty: true

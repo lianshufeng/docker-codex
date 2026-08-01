@@ -1,0 +1,12 @@
+interface:
+  display_name: codex reset forecast
+  short_description: 远程抓取 Tibo 与历史重置数据，生成固定 JSON、双语动态和支持双击/HTTP 的中文预测页。
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true

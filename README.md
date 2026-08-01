@@ -294,4 +294,12 @@ Codex 自身还会使用文件系统沙箱。若宿主机内核不允许容器�
 docker compose run --rm codex --sandbox danger-full-access
 ```
 
+完整的非交互调用示例：
+
+```bash
+docker compose run --rm -T --interactive=false codex --sandbox danger-full-access --ask-for-approval never exec --skip-git-repo-check "ping"
+```
+
+其中 `-T --interactive=false` 禁用终端交互，`--ask-for-approval never` 禁用审批提示，`--skip-git-repo-check` 允许在非 Git 仓库中执行任务。
+
 这会关闭 Codex 在容器内部的额外沙箱，不等于关闭 Docker 隔离，但会让 Codex 能访问容器内所有已挂载内容，因此不要挂载无关敏感目录。

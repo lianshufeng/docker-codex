@@ -1,0 +1,7 @@
+SKILL.md
+agents/openai.yaml
+assets/icon.svg
+assets/codex.html
+scripts/forecast.mjs
+references/data-contract.md
+references/model.md

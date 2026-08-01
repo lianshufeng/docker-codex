@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07111f">
+  <meta name="description" content="Codex 重置时间概率预测">
+  <title>Codex 重置预测</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --bg-soft: #0b1727;
+      --panel: rgba(14, 29, 48, .82);
+      --panel-strong: #10243a;
+      --line: rgba(139, 184, 224, .16);
+      --text: #eef7ff;
+      --muted: #91a9bd;
+      --cyan: #42e8d0;
+      --blue: #5a9cff;
+      --amber: #ffca66;
+      --red: #ff7f8c;
+      --shadow: 0 24px 70px rgba(0, 0, 0, .28);
+      --radius: 22px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 12% -8%, rgba(53, 129, 255, .2), transparent 34rem),
+        radial-gradient(circle at 92% 10%, rgba(66, 232, 208, .1), transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .18;
+      background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+      background-size: 40px 40px;
+      mask-image: linear-gradient(to bottom, black, transparent 80%);
+    }
+
+    a { color: inherit; }
+    button { font: inherit; }
+    .shell { width: min(1180px, calc(100% - 40px)); margin: 0 auto; position: relative; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; padding: 28px 0 18px; gap: 18px; }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 750; letter-spacing: .02em; }
+    .brand-mark {
+      width: 38px; height: 38px; display: grid; place-items: center; border-radius: 12px;
+      background: linear-gradient(135deg, var(--blue), var(--cyan)); color: #03131e; box-shadow: 0 0 30px rgba(66,232,208,.22);
+    }
+    .brand-mark svg { width: 22px; height: 22px; }
+    .top-status { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 14px var(--cyan); }
+    .status-dot.warn { background: var(--amber); box-shadow: 0 0 14px var(--amber); }
+    .status-dot.error { background: var(--red); box-shadow: 0 0 14px var(--red); }
+
+    .notice { display: none; margin: 10px 0 18px; padding: 14px 16px; border: 1px solid rgba(255,202,102,.35); border-radius: 14px; color: #ffe0a2; background: rgba(91,61,19,.28); }
+    .notice.show { display: block; }
+    .forecast-clock { display: flex; justify-content: space-between; gap: 18px; margin: 16px 0; padding: 14px 18px; border: 1px solid var(--line); border-radius: 16px; background: rgba(14,29,48,.65); }
+    .forecast-clock strong { display: block; font-size: 13px; }
+    .forecast-clock span { color: var(--muted); font-size: 12px; }
+    .loading { min-height: 58vh; display: grid; place-items: center; color: var(--muted); }
+    .loading[hidden] { display: none; }
+    .loader { width: 34px; height: 34px; margin: 0 auto 14px; border: 3px solid var(--line); border-top-color: var(--cyan); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #app[hidden] { display: none; }
+
+    .panel { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); backdrop-filter: blur(14px); }
+    .hero { position: relative; overflow: hidden; display: grid; grid-template-columns: 1.35fr .65fr; gap: 30px; padding: 44px; }
+    .hero::after { content: ""; position: absolute; width: 320px; height: 320px; right: -120px; top: -150px; border-radius: 50%; background: rgba(66,232,208,.09); filter: blur(4px); }
+    .eyebrow { color: var(--cyan); font-size: 13px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 12px 0 12px; max-width: 760px; font-size: clamp(30px, 5vw, 54px); line-height: 1.13; letter-spacing: -.035em; }
+    .hero-summary { margin: 0; max-width: 680px; color: #b9cddd; font-size: 16px; }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    .pill { padding: 7px 11px; border: 1px solid var(--line); border-radius: 999px; background: rgba(6,17,31,.45); color: var(--muted); font-size: 12px; }
+    .pill strong { color: var(--text); font-weight: 650; }
+    .probability-wrap { position: relative; z-index: 1; display: grid; place-items: center; }
+    .probability-ring { width: min(220px, 52vw); aspect-ratio: 1; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--cyan) var(--progress, 0%), rgba(255,255,255,.07) 0); box-shadow: inset 0 0 0 1px var(--line), 0 0 55px rgba(66,232,208,.12); }
+    .probability-ring::before { content: ""; position: absolute; width: calc(min(220px, 52vw) - 24px); aspect-ratio: 1; border-radius: 50%; background: #0a1828; box-shadow: inset 0 0 30px rgba(0,0,0,.35); }
+    .probability-value { position: relative; text-align: center; }
+    .probability-value strong { display: block; font-size: clamp(42px, 7vw, 62px); line-height: 1; letter-spacing: -.04em; }
+    .probability-value span { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
+
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 16px 0; }
+    .metric { padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: rgba(14,29,48,.65); }
+    .metric-label { color: var(--muted); font-size: 12px; }
+    .metric-value { margin-top: 7px; font-size: 21px; font-weight: 720; line-height: 1.3; }
+    .metric-note { margin-top: 5px; color: #7390a9; font-size: 11px; }
+
+    .grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); gap: 16px; margin-bottom: 16px; }
+    .grid > * { min-width: 0; }
+    .section { padding: 26px; }
+    .section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; margin-bottom: 20px; }
+    h2 { margin: 0; font-size: 19px; letter-spacing: -.01em; }
+    .section-subtitle { color: var(--muted); font-size: 12px; }
+    .chart-scroll { width: 100%; max-width: 100%; overflow-x: auto; padding-bottom: 4px; scrollbar-color: #29435b transparent; }
+    #probability-chart { display: block; width: 100%; min-width: 620px; height: auto; }
+    .chart-grid { stroke: rgba(145,169,189,.14); stroke-width: 1; }
+    .chart-area { fill: url(#area-gradient); }
+    .chart-line { fill: none; stroke: var(--cyan); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 0 8px rgba(66,232,208,.35)); }
+    .chart-point { fill: #0a1828; stroke: var(--cyan); stroke-width: 3; }
+    .chart-label { fill: var(--muted); font-size: 12px; }
+    .chart-value { fill: var(--text); font-size: 12px; font-weight: 700; }
+
+    .window-list, .factor-list, .source-list { display: grid; gap: 10px; }
+    .window { display: grid; grid-template-columns: 42px 1fr auto; gap: 12px; align-items: center; padding: 13px; border: 1px solid var(--line); border-radius: 14px; background: rgba(6,17,31,.34); }
+    .rank { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; background: rgba(90,156,255,.13); color: #9ec5ff; font-size: 12px; font-weight: 750; }
+    .window-time { font-size: 13px; }
+    .window-prob { color: var(--cyan); font-weight: 720; }
+    .empty { color: var(--muted); padding: 18px 0; }
+
+    .factor { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; padding: 16px; border: 1px solid var(--line); border-radius: 15px; background: rgba(6,17,31,.3); }
+    .factor-title { font-weight: 680; }
+    .factor-direction { padding: 3px 8px; border-radius: 999px; font-size: 11px; align-self: start; }
+    .factor-direction.increase { color: #ffd995; background: rgba(255,202,102,.13); }
+    .factor-direction.decrease { color: #9cece0; background: rgba(66,232,208,.1); }
+    .factor-direction.neutral { color: var(--muted); background: rgba(145,169,189,.1); }
+    .factor p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 13px; }
+
+    .standalone { margin-bottom: 16px; }
+    .tibo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .tibo-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: rgba(6,17,31,.34); }
+    .tibo-card.featured { border-color: rgba(90,156,255,.52); box-shadow: inset 3px 0 0 var(--blue); background: rgba(90,156,255,.07); }
+    .tibo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
+    .tibo-tag { padding: 3px 7px; border-radius: 999px; color: #a9caff; background: rgba(90,156,255,.14); }
+    .tibo-tag.signal { color: #8af3e3; background: rgba(66,232,208,.11); }
+    .tibo-zh { margin: 13px 0 8px; color: #e8f3fb; font-size: 15px; line-height: 1.75; }
+    .tibo-en { margin: 0 0 12px; color: #8fa7bb; font-size: 12px; line-height: 1.65; }
+    .tibo-card a, .source a { color: #8dbbff; text-decoration: none; font-size: 12px; }
+    .tibo-card a:hover, .source a:hover { text-decoration: underline; }
+
+    details { border: 1px solid var(--line); border-radius: 16px; background: rgba(6,17,31,.24); overflow: hidden; }
+    details + details { margin-top: 10px; }
+    summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: center; padding: 16px 18px; font-weight: 650; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; color: var(--cyan); font-size: 20px; }
+    details[open] summary::after { content: "−"; }
+    .details-body { padding: 0 18px 18px; color: var(--muted); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; min-width: 620px; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 12px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; }
+    td { color: #c9d9e6; }
+    .reason-toggle { padding: 6px 10px; border: 1px solid rgba(90,156,255,.34); border-radius: 9px; color: #a9caff; background: rgba(90,156,255,.1); cursor: pointer; }
+    .reason-toggle:hover { border-color: rgba(90,156,255,.62); }
+    .reason-row td { padding: 0 10px 14px; white-space: normal; }
+    .reason-card { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px; border: 1px solid rgba(90,156,255,.22); border-radius: 14px; background: rgba(8,22,38,.78); }
+    .reason-block { min-width: 0; }
+    .reason-block.wide { grid-column: 1 / -1; }
+    .reason-block strong { display: block; margin-bottom: 5px; color: var(--text); font-size: 12px; }
+    .reason-block p, .reason-block ul { margin: 0; color: #a9bfd0; font-size: 12px; line-height: 1.7; }
+    .reason-block ul { padding-left: 18px; }
+    .reason-source { margin-top: 10px; color: #6f8ba3; font-size: 11px; word-break: break-word; }
+    .model-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .model-item { padding: 12px; border-radius: 12px; background: rgba(14,29,48,.7); }
+    .model-item span { display: block; color: var(--muted); font-size: 11px; }
+    .model-item strong { display: block; margin-top: 4px; font-size: 13px; word-break: break-word; }
+
+    .source { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .source:last-child { border-bottom: 0; }
+    .source-meta { color: var(--muted); font-size: 11px; text-align: right; }
+    .risk { margin-top: 16px; padding: 14px 16px; border-radius: 14px; background: rgba(255,202,102,.07); color: #c9b98f; font-size: 12px; }
+    footer { padding: 28px 0 44px; color: #607b91; font-size: 12px; text-align: center; }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; padding: 34px; }
+      .probability-wrap { margin-top: 8px; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .grid { grid-template-columns: 1fr; }
+      .tibo-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 24px, 1180px); }
+      .topbar { padding-top: max(18px, env(safe-area-inset-top)); }
+      .top-status span:last-child { display: none; }
+      .hero { padding: 25px 20px; border-radius: 18px; }
+      h1 { font-size: 31px; }
+      .hero-summary { font-size: 14px; }
+      .metrics { gap: 10px; }
+      .metric { padding: 15px; border-radius: 15px; }
+      .metric-value { font-size: 17px; }
+      .section { padding: 20px 16px; }
+      #probability-chart { min-width: 100%; }
+      .forecast-table { min-width: 100%; }
+      .forecast-table th:nth-child(2), .forecast-table td:nth-child(2), .forecast-table th:nth-child(4), .forecast-table td:nth-child(4) { display: none; }
+      .section-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+      .forecast-clock { align-items: flex-start; flex-direction: column; gap: 3px; }
+      .model-grid { grid-template-columns: 1fr 1fr; }
+      .reason-card { grid-template-columns: 1fr; }
+      .reason-block.wide { grid-column: auto; }
+      .window { grid-template-columns: 36px 1fr; }
+      .window-prob { grid-column: 2; }
+      footer { padding-bottom: max(30px, env(safe-area-inset-bottom)); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 1 1 2.34 5.66M4 12V7m0 5h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <span>Codex Reset Forecast</span>
+    </div>
+    <div class="top-status"><i class="status-dot" id="status-dot"></i><span id="status-text">正在加载</span><span>· 数据驱动预测</span></div>
+  </header>
+
+  <main class="shell">
+    <div class="notice" id="notice" role="alert"></div>
+    <div class="loading" id="loading"><div><div class="loader"></div><div>正在读取最新预测数据…</div></div></div>
+    <div id="app" hidden>
+      <section class="panel hero">
+        <div>
+          <div class="eyebrow">核心预测结论</div>
+          <h1 id="headline">—</h1>
+          <p class="hero-summary" id="summary">—</p>
+          <div class="hero-meta">
+            <span class="pill">模型状态：<strong id="model-status">—</strong></span>
+            <span class="pill">置信等级：<strong id="confidence">—</strong></span>
+            <span class="pill">更新时间：<strong id="updated-at">—</strong></span>
+          </div>
+        </div>
+        <div class="probability-wrap">
+          <div class="probability-ring" id="probability-ring" aria-label="主要预测概率">
+            <div class="probability-value"><strong id="primary-probability">—</strong><span id="primary-horizon">累计概率</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="forecast-clock" id="forecast-clock" aria-live="polite">
+        <div><strong id="freshness-title">预测数据生成时间</strong><span id="freshness-detail">—</span></div>
+        <span id="browser-clock">—</span>
+      </section>
+
+      <section class="metrics" aria-label="关键指标">
+        <article class="metric"><div class="metric-label">24 小时概率</div><div class="metric-value" id="probability-24">—</div><div class="metric-note">模型累计风险</div></article>
+        <article class="metric"><div class="metric-label">72 小时概率</div><div class="metric-value" id="probability-72">—</div><div class="metric-note">预测范围上限</div></article>
+        <article class="metric"><div class="metric-label">最可能窗口</div><div class="metric-value" id="likely-window">—</div><div class="metric-note" id="likely-window-prob">—</div></article>
+        <article class="metric"><div class="metric-label">历史训练样本</div><div class="metric-value" id="sample-count">—</div><div class="metric-note" id="signal-count">—</div></article>
+      </section>
+
+      <section class="grid">
+        <article class="panel section">
+          <div class="section-head"><div><h2>重置概率趋势</h2><div class="section-subtitle">横轴表示从模型计算时点起经过的小时数；概率不会随浏览器时间平移</div></div></div>
+          <div class="chart-scroll"><svg id="probability-chart" viewBox="0 0 760 300" role="img" aria-label="未来重置累计概率折线图"></svg></div>
+        </article>
+        <article class="panel section">
+          <div class="section-head"><div><h2>高概率时间窗口</h2><div class="section-subtitle">每个窗口长度为 4 小时</div></div></div>
+          <div class="window-list" id="window-list"></div>
+        </article>
+      </section>
+
+      <section class="panel section standalone">
+        <div class="section-head"><div><h2>为什么这样判断</h2><div class="section-subtitle" id="confidence-explanation">模型因素的方向和贡献</div></div></div>
+        <div class="factor-list" id="factor-list"></div>
+      </section>
+
+      <section class="panel section standalone">
+        <div class="section-head"><div><h2>Tibo 近期动态</h2><div class="section-subtitle">中文翻译便于阅读，英文原文作为事实依据；动态不等同官方重置承诺</div></div></div>
+        <div class="tibo-grid" id="tibo-list"></div>
+      </section>
+
+      <section class="panel section">
+        <div class="section-head"><div><h2>数据与模型明细</h2></div></div>
+        <details open>
+          <summary>预测概率明细</summary>
+          <div class="details-body table-wrap"><table class="forecast-table"><thead><tr><th>预测范围</th><th>截止时间（北京时间）</th><th>贝叶斯校正概率</th><th>模型状态</th><th>推理依据</th></tr></thead><tbody id="forecast-table"></tbody></table></div>
+        </details>
+        <details open>
+          <summary>最近历史重置</summary>
+          <div class="details-body table-wrap"><table><thead><tr><th>确认时间（北京时间）</th><th>事件类型</th><th>置信度</th><th>数据来源</th></tr></thead><tbody id="history-table"></tbody></table></div>
+        </details>
+        <details open>
+          <summary>模型与回测指标</summary>
+          <div class="details-body"><div class="model-grid" id="model-grid"></div></div>
+        </details>
+      </section>
+
+      <section class="panel section" style="margin-top:16px">
+        <div class="section-head"><div><h2>数据来源</h2><div class="section-subtitle">链接和抓取状态来自结构化结果</div></div></div>
+        <div class="source-list" id="source-list"></div>
+        <div class="risk" id="risk-notice"></div>
+      </section>
+    </div>
+  </main>
+  <footer class="shell">Codex Reset Forecast · 统计预测不代表 OpenAI 官方时间表</footer>
+
+  <script type="application/json" id="embedded-forecast-data">__CODEX_FORECAST_JSON__</script>
+  <script>
+    "use strict";
+    const DATA_PATH = "./codex-reset-forecast.json";
+    const ns = "http://www.w3.org/2000/svg";
+    const $ = (id) => document.getElementById(id);
+    const setText = (id, value) => { $(id).textContent = value == null || value === "" ? "—" : String(value); };
+    const percent = (value) => Number.isFinite(Number(value)) ? `${Math.round(Number(value) * 100)}%` : "—";
+    const localTime = (value, withYear = false) => {
+      if (!value) return "—";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "—";
+      return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: withYear ? "numeric" : undefined, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date).replace(/\//g, "-");
+    };
+    const browserTime = (value) => {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "—";
+      const formatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" });
+      const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+      return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${parts.timeZoneName || ""}`.trim();
+    };
+    const ageText = (milliseconds) => {
+      const minutes = Math.max(0, Math.floor(milliseconds / 60000));
+      if (minutes < 1) return "不到 1 分钟";
+      if (minutes < 60) return `${minutes} 分钟`;
+      const hours = Math.floor(minutes / 60), remainder = minutes % 60;
+      return remainder ? `${hours} 小时 ${remainder} 分钟` : `${hours} 小时`;
+    };
+    const safeUrl = (value) => { try { const url = new URL(value); return url.protocol === "https:" ? url.href : null; } catch { return null; } };
+    const node = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text != null) element.textContent = text; return element; };
+    const svgNode = (tag, attrs = {}) => { const element = document.createElementNS(ns, tag); Object.entries(attrs).forEach(([key, value]) => element.setAttribute(key, value)); return element; };
+    const modelLabel = { trained: "贝叶斯信号模型", degraded: "贝叶斯收缩模型", blocked: "已阻断" };
+    const confidenceLabel = { low: "较低", medium: "中等", high: "较高", unavailable: "不可用" };
+    const featureLabel = {
+      log_hours_since_last_reset: "距上次重置时间",
+      decayed_tibo_signal: "Tibo 信号衰减",
+      recent_incident: "近期服务事故",
+      recent_release_or_milestone: "近期发布或里程碑",
+      utc_hour_sin: "UTC 时段周期（正弦）",
+      utc_hour_cos: "UTC 时段周期（余弦）",
+      tibo_intent_outcome_posterior: "Tibo 意图—结果校正"
+    };
+
+    function readEmbeddedData() {
+      const element = $("embedded-forecast-data");
+      if (!element || !element.textContent.trim()) throw new Error("HTML 未包含预测快照");
+      return JSON.parse(element.textContent);
+    }
+
+    function showNotice(message, isError = false) {
+      const notice = $("notice");
+      notice.textContent = message;
+      notice.classList.add("show");
+      if (isError) notice.style.borderColor = "rgba(255,127,140,.45)";
+    }
+
+    function renderChart(rows, now = Date.now()) {
+      const svg = $("probability-chart");
+      svg.replaceChildren();
+      const compact = window.innerWidth <= 560;
+      const width = compact ? 360 : 760;
+      svg.setAttribute("viewBox", `0 0 ${width} 300`);
+      const defs = svgNode("defs");
+      const gradient = svgNode("linearGradient", { id: "area-gradient", x1: "0", y1: "0", x2: "0", y2: "1" });
+      gradient.append(svgNode("stop", { offset: "0%", "stop-color": "#42e8d0", "stop-opacity": ".32" }), svgNode("stop", { offset: "100%", "stop-color": "#42e8d0", "stop-opacity": "0" }));
+      defs.append(gradient); svg.append(defs);
+      if (!rows.length) { const text = svgNode("text", { x: width / 2, y: 150, "text-anchor": "middle", class: "chart-label" }); text.textContent = "暂无可展示的预测数据"; svg.append(text); return; }
+      const left = compact ? 38 : 58, right = width - (compact ? 14 : 36), top = 28, bottom = 246;
+      const maximum = Math.max(20, Math.ceil(Math.max(...rows.map((row) => row.display_probability_percent)) / 20) * 20);
+      for (let step = 0; step <= 4; step += 1) {
+        const y = top + (bottom - top) * step / 4;
+        svg.append(svgNode("line", { x1: left, x2: right, y1: y, y2: y, class: "chart-grid" }));
+        const label = svgNode("text", { x: left - 12, y: y + 4, "text-anchor": "end", class: "chart-label" });
+        label.textContent = `${Math.round(maximum * (4 - step) / 4)}%`; svg.append(label);
+      }
+      const points = rows.map((row, index) => ({ x: left + (right - left) * index / Math.max(1, rows.length - 1), y: bottom - (bottom - top) * row.display_probability_percent / maximum, row }));
+      const line = points.map((point) => `${point.x},${point.y}`).join(" ");
+      const area = `${left},${bottom} ${line} ${right},${bottom}`;
+      svg.append(svgNode("polygon", { points: area, class: "chart-area" }), svgNode("polyline", { points: line, class: "chart-line" }));
+      points.forEach((point) => {
+        svg.append(svgNode("circle", { cx: point.x, cy: point.y, r: 6, class: "chart-point" }));
+        const value = svgNode("text", { x: point.x, y: point.y - 14, "text-anchor": "middle", class: "chart-value" }); value.textContent = `${point.row.display_probability_percent}%`;
+        const label = svgNode("text", { x: point.x, y: bottom + 28, "text-anchor": "middle", class: "chart-label" }); label.textContent = `+${point.row.horizon_hours}h`;
+        svg.append(value, label);
+      });
+    }
+
+    function renderWindows(windows) {
+      const target = $("window-list"); target.replaceChildren();
+      if (!windows.length) { target.append(node("div", "empty", "暂无高概率窗口")); return; }
+      windows.forEach((item) => {
+        const row = node("div", "window");
+        row.append(node("div", "rank", `#${item.rank}`), node("div", "window-time", `${localTime(item.start_at_beijing)} — ${localTime(item.end_at_beijing)}`), node("div", "window-prob", percent(item.window_probability)));
+        target.append(row);
+      });
+    }
+
+    function renderFactors(factors) {
+      const target = $("factor-list"); target.replaceChildren();
+      if (!factors.length) { target.append(node("div", "empty", "当前没有可解释的模型因素")); return; }
+      factors.forEach((item) => {
+        const card = node("div", "factor");
+        card.append(node("div", "factor-title", featureLabel[item.feature_key] || item.feature_key));
+        const direction = node("div", `factor-direction ${item.direction}`, item.direction === "increase" ? "提高风险" : item.direction === "decrease" ? "降低风险" : "影响中性");
+        card.append(direction, node("p", "", item.explanation)); target.append(card);
+      });
+    }
+
+    function renderTiboPosts(posts) {
+      const target = $("tibo-list"); target.replaceChildren();
+      if (!posts.length) { target.append(node("div", "empty", "没有可展示的近期 Tibo 动态")); return; }
+      posts.forEach((post) => {
+        const card = node("article", `tibo-card${post.is_latest_reset_signal ? " featured" : ""}`);
+        const meta = node("div", "tibo-meta");
+        meta.append(node("span", "", localTime(post.published_at_utc, true)));
+        if (post.is_latest_overall) meta.append(node("span", "tibo-tag", "最新动态"));
+        if (post.is_latest_reset_signal) meta.append(node("span", "tibo-tag signal", `重置信号 Lv.${post.signal_level}`));
+        else meta.append(node("span", "tibo-tag", post.post_type === "codex" ? "Codex" : post.post_type === "limits" ? "额度相关" : post.post_type === "release" ? "产品发布" : "其他动态"));
+        const chinese = node("p", "tibo-zh", post.text_zh); chinese.lang = "zh-CN";
+        const original = node("p", "tibo-en", post.text_original); original.lang = "en";
+        card.append(meta, chinese, original);
+        const url = safeUrl(post.url);
+        if (url) { const link = node("a", "", "查看原始来源 ↗"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; card.append(link); }
+        target.append(card);
+      });
+    }
+
+    function reasoningBlock(title, content, wide = false) {
+      const block = node("div", `reason-block${wide ? " wide" : ""}`);
+      block.append(node("strong", "", title));
+      if (Array.isArray(content)) {
+        const list = document.createElement("ul");
+        content.forEach((item) => list.append(node("li", "", item)));
+        block.append(list);
+      } else block.append(node("p", "", content));
+      return block;
+    }
+
+    function renderHorizonReasoning(reasoning) {
+      const card = node("div", "reason-card");
+      card.append(
+        reasoningBlock("统计模型依据", reasoning.model_basis, true),
+        reasoningBlock("LLM 证据解读", reasoning.llm_evidence_summary, true),
+        reasoningBlock("支持因素", reasoning.supporting_factors),
+        reasoningBlock("反向因素", reasoning.counter_factors),
+        reasoningBlock("累计概率含义", reasoning.cumulative_effect),
+        reasoningBlock("不确定性", reasoning.uncertainty)
+      );
+      card.append(node("div", "reason-source wide", `证据引用：${reasoning.evidence_refs.join(" · ")}`));
+      return card;
+    }
+
+    function renderTables(data) {
+      const forecastBody = $("forecast-table"); forecastBody.replaceChildren();
+      data.forecast.horizons.forEach((item) => {
+        const row = document.createElement("tr");
+        row.dataset.deadline = item.deadline_utc;
+        row.dataset.modelStatus = modelLabel[data.model.status] || data.model.status;
+        row.append(node("td", "", `计算后 ${item.horizon_hours} 小时`), node("td", "", localTime(item.deadline_beijing, true)), node("td", "", `${item.display_probability_percent}%（基线 ${Math.round(item.baseline_probability * 100)}%，校正 ${item.signal_probability_delta >= 0 ? "+" : ""}${(item.signal_probability_delta * 100).toFixed(1)}pp）`));
+        const statusCell = node("td", "model-status-cell", row.dataset.modelStatus);
+        const actionCell = node("td");
+        const toggle = node("button", "reason-toggle", "查看完整理由");
+        toggle.type = "button"; toggle.setAttribute("aria-expanded", "false");
+        actionCell.append(toggle); row.append(statusCell, actionCell);
+        const reasonRow = node("tr", "reason-row"); reasonRow.hidden = true;
+        const reasonCell = node("td"); reasonCell.colSpan = 5; reasonCell.append(renderHorizonReasoning(item.reasoning)); reasonRow.append(reasonCell);
+        toggle.addEventListener("click", () => { reasonRow.hidden = !reasonRow.hidden; toggle.setAttribute("aria-expanded", String(!reasonRow.hidden)); toggle.textContent = reasonRow.hidden ? "查看完整理由" : "收起理由"; });
+        forecastBody.append(row, reasonRow);
+      });
+      const historyBody = $("history-table"); historyBody.replaceChildren();
+      data.history.events.filter((item) => item.event_type === "confirmed_reset").slice(-8).reverse().forEach((item) => {
+        const row = document.createElement("tr");
+        row.append(node("td", "", localTime(item.announced_at_utc, true)), node("td", "", "确认重置"), node("td", "", `${Math.round(item.confidence * 100)}%`));
+        const cell = node("td"); const url = safeUrl(item.source_url);
+        if (url) { const link = node("a", "", "查看 ↗"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; cell.append(link); } else cell.textContent = "—";
+        row.append(cell); historyBody.append(row);
+      });
+    }
+
+    function renderModel(data) {
+      const target = $("model-grid"); target.replaceChildren();
+      const validation = data.model.validation;
+      const values = [
+        ["模型", data.model.name], ["模型版本", data.model.version], ["模型变体", data.model.variant],
+        ["训练样本", data.model.training.sample_count], ["正样本", data.model.training.positive_count], ["回测折数", validation.fold_count],
+        ["4h Brier", validation.brier_score_4h?.toFixed(4)], ["24h Brier", validation.brier_score_24h?.toFixed(4)], ["72h Brier", validation.brier_score_72h?.toFixed(4)],
+        ["信号校正", data.model.signal_adjustment?.method], ["当前信号等级", data.model.signal_adjustment?.current_signal_level], ["当前信号已等待", `${data.model.signal_adjustment?.current_signal_age_hours ?? "—"} 小时`],
+        ["历史意图样本", data.model.signal_adjustment?.historical_intent_count], ["精确结果", data.model.signal_adjustment?.exact_outcome_count], ["区间删失结果", data.model.signal_adjustment?.interval_censored_outcome_count]
+      ];
+      values.forEach(([label, value]) => { const item = node("div", "model-item"); item.append(node("span", "", label), node("strong", "", value ?? "—")); target.append(item); });
+    }
+
+    function renderSources(sources) {
+      const target = $("source-list"); target.replaceChildren();
+      sources.forEach((item) => {
+        const row = node("div", "source"); const title = node("div"); const url = safeUrl(item.url);
+        if (url) { const link = node("a", "", item.name); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; title.append(link); } else title.textContent = item.name;
+        row.append(title, node("div", "source-meta", `${item.status === "ok" ? "可用" : "异常"} · ${localTime(item.retrieved_at_utc, true)}`)); target.append(row);
+      });
+    }
+
+    function updateFreshness(data) {
+      const now = Date.now();
+      const calculatedAt = new Date(data.current?.as_of_utc || data.generated_at_utc).getTime();
+      const age = Math.max(0, now - calculatedAt);
+      setText("freshness-title", "本次预测生成于");
+      setText("freshness-detail", `${localTime(calculatedAt, true)}（北京时间） · 已发布 ${ageText(age)}`);
+      setText("browser-clock", `浏览器当前时间：${browserTime(now)}`);
+      renderChart(data.forecast.horizons, now);
+      if (data.status !== "blocked") {
+        $("status-dot").className = data.status === "degraded" ? "status-dot warn" : "status-dot";
+        setText("status-text", data.status === "degraded" ? "贝叶斯模型" : "预测数据有效");
+      }
+    }
+
+    function render(data) {
+      const conclusion = data.conclusion;
+      const blocked = data.status === "blocked";
+      setText("headline", conclusion.headline);
+      setText("summary", conclusion.summary);
+      setText("model-status", modelLabel[data.model.status] || data.model.status);
+      setText("confidence", confidenceLabel[conclusion.confidence_level] || conclusion.confidence_level);
+      setText("updated-at", localTime(data.generated_at_utc, true));
+      setText("primary-probability", conclusion.primary_probability_percent == null ? "—" : `${conclusion.primary_probability_percent}%`);
+      setText("primary-horizon", conclusion.primary_horizon_hours == null ? "暂无预测" : `${conclusion.primary_horizon_hours} 小时累计概率`);
+      $("probability-ring").style.setProperty("--progress", `${conclusion.primary_probability_percent || 0}%`);
+      const h24 = data.forecast.horizons.find((item) => item.horizon_hours === 24);
+      const h72 = data.forecast.horizons.find((item) => item.horizon_hours === 72);
+      setText("probability-24", h24 ? `${h24.display_probability_percent}%` : "—");
+      setText("probability-72", h72 ? `${h72.display_probability_percent}%` : "—");
+      setText("likely-window", conclusion.most_likely_window_start_beijing ? `${localTime(conclusion.most_likely_window_start_beijing)} 起` : "暂无");
+      setText("likely-window-prob", conclusion.most_likely_window_probability == null ? "未生成时间窗口" : `该 4 小时窗口概率 ${percent(conclusion.most_likely_window_probability)}`);
+      setText("sample-count", `${data.history.confirmed_reset_count} 次重置`);
+      setText("signal-count", `${data.history.signal_count} 条历史信号`);
+      setText("confidence-explanation", conclusion.confidence_explanation);
+      renderWindows(data.forecast.most_likely_windows);
+      renderFactors(data.explanation.factors);
+      renderTiboPosts(data.current.recent_tibo_posts || []);
+      renderTables(data);
+      renderModel(data);
+      renderSources(data.sources);
+      setText("risk-notice", data.explanation.risk_notice);
+      const statusDot = $("status-dot");
+      if (blocked) { statusDot.className = "status-dot error"; setText("status-text", "预测已阻断"); showNotice(data.blocked_reasons.join("；") || "当前数据不足，无法生成预测。", true); }
+      updateFreshness(data);
+      $("loading").hidden = true; $("app").hidden = false;
+    }
+
+    async function boot() {
+      if (location.protocol === "file:") {
+        try { render(readEmbeddedData()); }
+        catch (error) {
+          $("loading").hidden = true;
+          $("status-dot").className = "status-dot error";
+          setText("status-text", "数据加载失败");
+          showNotice(`无法读取 HTML 内置预测快照：${error.message}`, true);
+        }
+        return;
+      }
+      try {
+        const response = await fetch(DATA_PATH, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (!data || !data.conclusion || !data.forecast || !data.model) throw new Error("JSON 结构不完整");
+        render(data);
+      } catch (error) {
+        try {
+          render(readEmbeddedData());
+          showNotice(`相对 JSON 加载失败（${error.message}），当前展示 HTML 内置的同批次预测快照。`);
+        } catch (fallbackError) {
+          $("loading").hidden = true;
+          $("status-dot").className = "status-dot error";
+          setText("status-text", "数据加载失败");
+          showNotice(`无法加载 ${DATA_PATH}，HTML 内置快照也不可用：${fallbackError.message}`, true);
+        }
+      }
+    }
+    boot();
+  </script>
+</body>
+</html>

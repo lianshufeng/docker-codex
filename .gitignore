@@ -10,3 +10,6 @@ secrets/
 # 示例工作目录中的实际项目通常单独管理版本。
 workspace/*
 !workspace/.gitkeep
+
+codex-reset-forecast.json
+/codex.html
