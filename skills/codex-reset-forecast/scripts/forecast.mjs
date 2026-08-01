@@ -1,17 +1,30 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 const OUTPUT_NAME = "codex-reset-forecast.json";
 const HTML_NAME = "codex.html";
 const HTML_TEMPLATE = new URL("../assets/codex.html", import.meta.url);
+const LOCAL_SERVER_NAME = "codex-local-server.mjs";
+const LOCAL_SERVER_TEMPLATE = new URL(`../assets/${LOCAL_SERVER_NAME}`, import.meta.url);
+const LOCAL_LAUNCHER_NAME = "open-codex.cmd";
+const LOCAL_LAUNCHER_TEMPLATE = new URL(`../assets/${LOCAL_LAUNCHER_NAME}`, import.meta.url);
 const HORIZONS = [2, 4, 8, 12, 24, 72];
 const LAMBDAS = [0.01, 0.1, 1, 10, 100];
 const DECAYS = [12, 24, 48, 72];
+const DEFAULT_WORK_TIMEZONE = "America/Los_Angeles";
+const SIGNAL_PRIOR_STRENGTH = 1;
+const SCHEMA_VERSION = "1.8.1";
+const MODEL_VERSION = "3.1.0";
+const REUSE_MAX_AGE_MINUTES = 20;
+const FULL_REFRESH_MAX_AGE_HOURS = 24;
+const COOLDOWN_HOUR_CANDIDATES = [6, 12, 24];
 const FEATURE_KEYS = [
   "log_hours_since_last_reset",
+  "post_reset_cooldown",
   "decayed_tibo_signal",
   "recent_incident",
   "recent_release_or_milestone",
@@ -20,15 +33,28 @@ const FEATURE_KEYS = [
 ];
 
 function parseArgs(argv) {
-  const args = { input: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, selfTest: false };
+  const args = { input: null, inputBase64: null, probeBase64: null, existing: null, backtest: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, postUrl: null, selfTest: false };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--input") args.input = argv[++i];
+    else if (argv[i] === "--input-base64") args.inputBase64 = argv[++i];
+    else if (argv[i] === "--probe-base64") args.probeBase64 = argv[++i];
+    else if (argv[i] === "--existing") args.existing = path.resolve(argv[++i]);
+    else if (argv[i] === "--backtest") args.backtest = argv[++i];
     else if (argv[i] === "--output") args.output = path.resolve(argv[++i]);
     else if (argv[i] === "--render-existing") args.renderExisting = path.resolve(argv[++i]);
+    else if (argv[i] === "--post-url") args.postUrl = argv[++i];
     else if (argv[i] === "--self-test") args.selfTest = true;
     else throw new Error(`未知参数：${argv[i]}`);
   }
   return args;
+}
+
+function readInputText(inputPath, base64Source = null) {
+  if (base64Source != null) {
+    const encoded = base64Source === "-" ? fs.readFileSync(0, "ascii").trim() : base64Source;
+    return Buffer.from(encoded, "base64").toString("utf8");
+  }
+  return inputPath === "-" ? fs.readFileSync(0, "utf8") : fs.readFileSync(path.resolve(inputPath), "utf8");
 }
 
 function finiteOrNull(value) {
@@ -45,6 +71,14 @@ function beijingIso(value) {
   const date = new Date(value);
   const local = new Date(date.getTime() + 8 * 3600_000).toISOString().replace("Z", "+08:00");
   return local;
+}
+
+function localTimeParts(value, timeZone) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(new Date(value)).map((part) => [part.type, part.value]));
+  return { hour: Number(parts.hour), minute: Number(parts.minute), weekday: parts.weekday };
 }
 
 function sigmoid(value) {
@@ -148,7 +182,7 @@ function normalizeRecentPost(post) {
     text_zh: String(post?.text_zh ?? ""),
     translation_method: String(post?.translation_method ?? "chatgpt"),
     post_type: String(post?.post_type ?? "other"),
-    signal_level: Math.min(3, Math.max(0, Number(post?.signal_level ?? 0))),
+    signal_level: Math.min(4, Math.max(0, Number(post?.signal_level ?? 0))),
     classification_evidence: String(post?.classification_evidence ?? ""),
     is_latest_overall: Boolean(post?.is_latest_overall),
     is_latest_reset_signal: Boolean(post?.is_latest_reset_signal),
@@ -239,8 +273,17 @@ function normalizeInput(input) {
     signals,
     contexts,
     horizonReasoning,
+    refresh: {
+      mode: "full_refresh",
+      checked_at_utc: input.refresh?.checked_at_utc ? iso(input.refresh.checked_at_utc, "refresh.checked_at_utc") : asOf,
+      last_full_refresh_at_utc: input.refresh?.last_full_refresh_at_utc ? iso(input.refresh.last_full_refresh_at_utc, "refresh.last_full_refresh_at_utc") : asOf,
+      status_indicator: input.refresh?.status_indicator == null ? null : String(input.refresh.status_indicator),
+      active_incident_id: input.refresh?.active_incident_id == null ? null : String(input.refresh.active_incident_id),
+      cached_history_verified: false,
+    },
     current: {
       cross_source_consistent: Boolean(input.current?.cross_source_consistent),
+      tibo_work_timezone: String(input.current?.tibo_work_timezone ?? DEFAULT_WORK_TIMEZONE),
       latest_overall_post: normalizePost(input.current?.latest_overall_post),
       latest_reset_signal: normalizePost(input.current?.latest_reset_signal),
       recent_tibo_posts: recentPosts,
@@ -258,6 +301,50 @@ function confirmedEvents(data) {
   });
 }
 
+function refreshFingerprintPayload({ latestOverallPost, latestResetSignal, lastResetEventId, lastResetAt, statusIndicator, activeIncidentId }) {
+  return {
+    schema_version: SCHEMA_VERSION,
+    model_version: MODEL_VERSION,
+    latest_overall_post_id: latestOverallPost?.post_id ?? null,
+    latest_overall_post_at_utc: latestOverallPost?.published_at_utc ?? null,
+    latest_reset_signal_id: latestResetSignal?.post_id ?? null,
+    latest_reset_signal_at_utc: latestResetSignal?.published_at_utc ?? null,
+    latest_reset_signal_level: latestResetSignal?.signal_level ?? null,
+    last_confirmed_reset_event_id: lastResetEventId ?? null,
+    last_confirmed_reset_at_utc: lastResetAt ?? null,
+    status_indicator: statusIndicator ?? null,
+    active_incident_id: activeIncidentId ?? null,
+  };
+}
+
+function hashRefreshPayload(payload) {
+  return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function buildRefreshOutput(data, events) {
+  const lastReset = events.at(-1) ?? null;
+  const payload = refreshFingerprintPayload({
+    latestOverallPost: data.current.latest_overall_post,
+    latestResetSignal: data.current.latest_reset_signal,
+    lastResetEventId: lastReset?.event_id,
+    lastResetAt: lastReset?.announced_at_utc,
+    statusIndicator: data.refresh.status_indicator,
+    activeIncidentId: data.refresh.active_incident_id,
+  });
+  return {
+    mode: data.refresh.mode,
+    data_fingerprint: hashRefreshPayload(payload),
+    checked_at_utc: data.refresh.checked_at_utc,
+    last_full_refresh_at_utc: data.refresh.mode === "full_refresh" ? data.asOf : data.refresh.last_full_refresh_at_utc,
+    status_indicator: data.refresh.status_indicator,
+    active_incident_id: data.refresh.active_incident_id,
+    last_confirmed_reset_event_id: lastReset?.event_id ?? null,
+    last_confirmed_reset_at_utc: lastReset?.announced_at_utc ?? null,
+    reuse_max_age_minutes: REUSE_MAX_AGE_MINUTES,
+    full_refresh_max_age_hours: FULL_REFRESH_MAX_AGE_HOURS,
+  };
+}
+
 function latestBefore(items, time, field) {
   const limit = new Date(time).getTime();
   let latest = null;
@@ -268,7 +355,7 @@ function latestBefore(items, time, field) {
   return latest;
 }
 
-function featureVector(timeMs, lastResetMs, data, decayHours) {
+function featureVector(timeMs, lastResetMs, data, decayHours, cooldownHours = 12) {
   const hoursSinceReset = Math.max(0, (timeMs - lastResetMs) / 3600_000);
   const signal = latestBefore(data.signals.filter((item) => item.signal_level > 0), timeMs, "published_at_utc");
   const signalAge = signal ? Math.max(0, (timeMs - new Date(signal.published_at_utc).getTime()) / 3600_000) : Infinity;
@@ -279,6 +366,7 @@ function featureVector(timeMs, lastResetMs, data, decayHours) {
   const hour = new Date(timeMs).getUTCHours();
   return {
     log_hours_since_last_reset: Math.log1p(hoursSinceReset),
+    post_reset_cooldown: Math.exp(-hoursSinceReset / cooldownHours),
     decayed_tibo_signal: signal ? signal.signal_level * Math.exp(-signalAge / decayHours) : 0,
     recent_incident: recentContexts.some((item) => item.context_type === "incident") ? 1 : 0,
     recent_release_or_milestone: recentContexts.some((item) => ["release", "milestone"].includes(item.context_type)) ? 1 : 0,
@@ -287,7 +375,7 @@ function featureVector(timeMs, lastResetMs, data, decayHours) {
   };
 }
 
-function buildRows(events, data, decayHours, endAtMs = null) {
+function buildRows(events, data, decayHours, endAtMs = null, cooldownHours = 12) {
   const rows = [];
   for (let index = 0; index < events.length - 1; index += 1) {
     const startMs = new Date(events[index].announced_at_utc).getTime();
@@ -296,11 +384,11 @@ function buildRows(events, data, decayHours, endAtMs = null) {
     for (let timeMs = startMs + 3600_000; timeMs < stopMs; timeMs += 3600_000) {
       rows.push({
         timeMs,
-        features: featureVector(timeMs, startMs, data, decayHours),
+        features: featureVector(timeMs, startMs, data, decayHours, cooldownHours),
         y: 0,
       });
     }
-    if (stopMs === eventMs) rows.push({ timeMs: eventMs, features: featureVector(eventMs, startMs, data, decayHours), y: 1 });
+    if (stopMs === eventMs) rows.push({ timeMs: eventMs, features: featureVector(eventMs, startMs, data, decayHours, cooldownHours), y: 1 });
   }
   return rows;
 }
@@ -326,7 +414,7 @@ function cumulativeForecast(model, data, lastResetMs, asOfMs, maxHours = 72) {
   const hourly = [];
   for (let hour = 1; hour <= maxHours; hour += 1) {
     const timeMs = asOfMs + hour * 3600_000;
-    const features = featureVector(timeMs, lastResetMs, data, model.decayHours ?? 24);
+    const features = featureVector(timeMs, lastResetMs, data, model.decayHours ?? 24, model.cooldownHours ?? 12);
     const hazard = Math.min(0.999, Math.max(0.000001, predictHazard(model, features)));
     const before = survival;
     survival *= 1 - hazard;
@@ -336,15 +424,19 @@ function cumulativeForecast(model, data, lastResetMs, asOfMs, maxHours = 72) {
   return { points, hourly };
 }
 
-function signalSimilarity(signal, currentSignal) {
-  const levelWeight = Math.exp(-0.8 * Math.abs(signal.signal_level - currentSignal.signal_level));
-  const classWeight = signal.intent_class === currentSignal.intent_class ? 1
-    : signal.intent_class === "explicit_commitment" || currentSignal.intent_class === "explicit_commitment" ? 0.25 : 0.55;
+function signalSimilarity(signal, currentSignal, targetAge = null) {
+  const levelWeight = Math.exp(-0.45 * Math.abs(signal.signal_level - currentSignal.signal_level));
+  let classWeight = 1;
+  if (signal.intent_class !== currentSignal.intent_class) {
+    if (currentSignal.intent_class === "weak_mention") classWeight = 0.08;
+    else if (signal.intent_class === "weak_mention") classWeight = 0.25;
+    else classWeight = currentSignal.intent_class === "directional_reset" && Number.isFinite(targetAge) && targetAge <= 4 ? 0.15 : 0.65;
+  }
   return levelWeight * classWeight * signal.confidence;
 }
 
 function bayesianSignalAdjustment(points, data, currentSignal, asOfMs) {
-  const priorStrength = 10;
+  const priorStrength = SIGNAL_PRIOR_STRENGTH;
   const currentAge = Math.max(0, (asOfMs - new Date(currentSignal.published_at_utc).getTime()) / 3600_000);
   let previous = 0;
   return points.map((point) => {
@@ -352,27 +444,25 @@ function bayesianSignalAdjustment(points, data, currentSignal, asOfMs) {
     let failureWeight = 0;
     let exactCount = 0;
     let intervalCount = 0;
-    let excludedBeforeCurrentAge = 0;
+    let unavailableCount = 0;
     for (const signal of data.signals) {
       if (signal.post_id === currentSignal.post_id || signal.signal_level <= 0) continue;
-      const weight = signalSimilarity(signal, currentSignal);
       const lower = signal.latency_lower_hours;
       const upper = signal.latency_upper_hours;
+      const targetAge = currentAge + point.hour;
+      const weight = signalSimilarity(signal, currentSignal, targetAge);
       if (Number.isFinite(upper)) {
-        if (upper <= currentAge) {
-          excludedBeforeCurrentAge += 1;
-          continue;
-        }
-        if (Number.isFinite(lower) && lower > currentAge + point.hour) failureWeight += weight;
-        else if (upper <= currentAge + point.hour && (!Number.isFinite(lower) || lower > currentAge)) {
+        if (upper <= targetAge) {
           successWeight += weight;
           if (signal.outcome_time_kind === "exact") exactCount += 1;
           else intervalCount += 1;
-        }
+        } else if (Number.isFinite(lower) && lower > targetAge) failureWeight += weight;
+        else unavailableCount += 1;
         continue;
       }
       const observedHours = (new Date(signal.observation_end_at_utc).getTime() - new Date(signal.published_at_utc).getTime()) / 3600_000;
-      if (observedHours >= currentAge + point.hour) failureWeight += weight;
+      if (observedHours >= targetAge) failureWeight += weight;
+      else unavailableCount += 1;
     }
     const base = point.probability;
     const alpha = Math.max(0.001, priorStrength * base) + successWeight;
@@ -393,10 +483,98 @@ function bayesianSignalAdjustment(points, data, currentSignal, asOfMs) {
         effective_sample_count: Number((successWeight + failureWeight).toFixed(6)),
         weighted_successes: Number(successWeight.toFixed(6)), weighted_failures: Number(failureWeight.toFixed(6)),
         exact_outcome_count: exactCount, interval_censored_count: intervalCount,
-        excluded_before_current_age_count: excludedBeforeCurrentAge,
+        unavailable_outcome_count: unavailableCount,
       },
     };
   });
+}
+
+function circularHourDistance(a, b) {
+  const direct = Math.abs(a - b);
+  return Math.min(direct, 24 - direct);
+}
+
+function outcomeTimes(data) {
+  const values = confirmedEvents(data).map((event) => event.effective_at_utc ?? event.announced_at_utc);
+  for (const signal of data.signals) {
+    if (signal.outcome_time_kind === "exact" && signal.reset_at_utc) values.push(signal.reset_at_utc);
+  }
+  return [...new Set(values)];
+}
+
+function workWindowMultiplier(value, data) {
+  const timeZone = data.current.tibo_work_timezone;
+  const parts = localTimeParts(value, timeZone);
+  const workingPrior = parts.hour >= 8 && parts.hour < 19 ? 1.35 : 0.65;
+  const weekend = new Set(["Sat", "Sun"]).has(parts.weekday) ? 0.9 : 1;
+  const hours = outcomeTimes(data).map((item) => localTimeParts(item, timeZone).hour);
+  if (!hours.length) return workingPrior * weekend;
+  const density = hours.reduce((sum, hour) => sum + Math.exp(-0.5 * (circularHourDistance(parts.hour, hour) / 3) ** 2), 0) / hours.length;
+  const reference = Array.from({ length: 24 }, (_, hour) => hours.reduce((sum, sample) => sum + Math.exp(-0.5 * (circularHourDistance(hour, sample) / 3) ** 2), 0) / hours.length)
+    .reduce((sum, item) => sum + item, 0) / 24;
+  return weekend * (0.45 * workingPrior + 0.55 * Math.max(0.35, density / Math.max(reference, 1e-6)));
+}
+
+function signalLatencyWeight(ageHours, data, currentSignal) {
+  let density = ageHours <= 72 ? 0.08 : 0.01;
+  for (const signal of data.signals) {
+    if (signal.post_id === currentSignal.post_id || !Number.isFinite(signal.latency_upper_hours)) continue;
+    const lower = Number.isFinite(signal.latency_lower_hours) ? signal.latency_lower_hours : 0;
+    const midpoint = (lower + signal.latency_upper_hours) / 2;
+    const bandwidth = Math.max(3, (signal.latency_upper_hours - lower) / 2 + 2);
+    density += signalSimilarity(signal, currentSignal) * Math.exp(-0.5 * ((ageHours - midpoint) / bandwidth) ** 2);
+  }
+  return density;
+}
+
+function adjustedHourlyForecast(baseHourly, adjustedPoints, data, currentSignal, asOfMs) {
+  const output = [];
+  let previousHour = 0;
+  let previousProbability = 0;
+  const signalStartMs = new Date(currentSignal.published_at_utc).getTime();
+  for (const point of adjustedPoints) {
+    const segment = baseHourly.filter((item) => item.hour > previousHour && item.hour <= point.hour);
+    const segmentProbability = Math.max(0, point.probability - previousProbability);
+    const weights = segment.map((item) => {
+      const latency = (item.timeMs - signalStartMs) / 3600_000;
+      return Math.max(1e-9, (item.windowProbability + 0.0001) * workWindowMultiplier(item.timeMs, data) * signalLatencyWeight(latency, data, currentSignal));
+    });
+    const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+    segment.forEach((item, index) => output.push({ ...item, windowProbability: segmentProbability * weights[index] / totalWeight }));
+    previousHour = point.hour;
+    previousProbability = point.probability;
+  }
+  return output;
+}
+
+function worktimeHourlyForecast(baseHourly, points, data) {
+  const output = [];
+  let previousHour = 0;
+  let previousProbability = 0;
+  for (const point of points) {
+    const segment = baseHourly.filter((item) => item.hour > previousHour && item.hour <= point.hour);
+    const segmentProbability = Math.max(0, point.probability - previousProbability);
+    const weights = segment.map((item) => Math.max(1e-9, (item.windowProbability + 0.0001) * workWindowMultiplier(item.timeMs, data)));
+    const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+    segment.forEach((item, index) => output.push({ ...item, windowProbability: segmentProbability * weights[index] / totalWeight }));
+    previousHour = point.hour;
+    previousProbability = point.probability;
+  }
+  return output;
+}
+
+function baselineAdjustedPoints(points) {
+  return points.map((point) => ({
+    ...point,
+    baselineProbability: point.probability,
+    signalDelta: 0,
+    confidenceLower: 0,
+    confidenceUpper: 1,
+    posterior: {
+      alpha: null, beta: null, effective_sample_count: 0, weighted_successes: 0, weighted_failures: 0,
+      exact_outcome_count: 0, interval_censored_count: 0, unavailable_outcome_count: 0,
+    },
+  }));
 }
 
 function brier(values) {
@@ -404,16 +582,72 @@ function brier(values) {
   return values.reduce((sum, item) => sum + (item.prediction - item.actual) ** 2, 0) / values.length;
 }
 
-function validateCandidate(events, data, featureKeys, lambda, decayHours) {
+function signalOutcomeAt(signal, horizon) {
+  if (Number.isFinite(signal.latency_upper_hours) && signal.latency_upper_hours <= horizon) return 1;
+  if (Number.isFinite(signal.latency_lower_hours) && signal.latency_lower_hours > horizon) return 0;
+  if (signal.outcome_time_kind === "right_censored") {
+    const observed = (new Date(signal.observation_end_at_utc) - new Date(signal.published_at_utc)) / 3600_000;
+    if (observed >= horizon) return 0;
+  }
+  return null;
+}
+
+function signalWalkForwardValidation(events, data) {
+  const signalScores = Object.fromEntries([4, 24, 72].map((horizon) => [horizon, []]));
+  const baselineScores = Object.fromEntries([4, 24, 72].map((horizon) => [horizon, []]));
+  const folds = [];
+  const ordered = data.signals.filter((signal) => signal.signal_level > 0).sort((a, b) => new Date(a.published_at_utc) - new Date(b.published_at_utc));
+  for (let index = 3; index < ordered.length; index += 1) {
+    const currentSignal = ordered[index];
+    const asOfMs = new Date(currentSignal.published_at_utc).getTime();
+    const priorEvents = events.filter((event) => new Date(event.announced_at_utc).getTime() <= asOfMs);
+    if (priorEvents.length < 10) continue;
+    const foldData = { ...data, signals: ordered.slice(0, index) };
+    const { model: foldModel } = selectModel(priorEvents, foldData, false);
+    if (!foldModel.converged) continue;
+    const lastReset = priorEvents.at(-1);
+    const base = cumulativeForecast(foldModel, foldData, new Date(lastReset.announced_at_utc).getTime(), asOfMs);
+    const adjusted = bayesianSignalAdjustment(base.points, foldData, currentSignal, asOfMs);
+    const predictions = {};
+    const actuals = {};
+    for (const horizon of [4, 24, 72]) {
+      const actual = signalOutcomeAt(currentSignal, horizon);
+      if (actual == null) continue;
+      const signalPoint = adjusted.find((point) => point.hour === horizon);
+      const baselinePoint = base.points.find((point) => point.hour === horizon);
+      signalScores[horizon].push({ prediction: signalPoint.probability, actual });
+      baselineScores[horizon].push({ prediction: baselinePoint.probability, actual });
+      predictions[horizon] = Number(signalPoint.probability.toFixed(6));
+      actuals[horizon] = actual;
+    }
+    if (Object.keys(actuals).length) folds.push({ post_id: currentSignal.post_id, published_at_utc: currentSignal.published_at_utc, predictions, actuals });
+  }
+  const signalMetrics = Object.fromEntries(Object.entries(signalScores).map(([key, values]) => [key, brier(values)]));
+  const baselineMetrics = Object.fromEntries(Object.entries(baselineScores).map(([key, values]) => [key, brier(values)]));
+  const latestHoldout = folds.at(-1) ?? null;
+  const comparable24 = Number.isFinite(signalMetrics[24]) && Number.isFinite(baselineMetrics[24]);
+  return {
+    method: "signal_origin_expanding_window",
+    folds: folds.length,
+    metrics: signalMetrics,
+    baselineMetrics,
+    passed: folds.length >= 3 && comparable24 && signalMetrics[24] <= baselineMetrics[24],
+    latestHoldout,
+    fold_details: folds,
+  };
+}
+
+function validateCandidate(events, data, featureKeys, lambda, decayHours, cooldownHours) {
   const scores = Object.fromEntries([4, 24, 72].map((horizon) => [horizon, []]));
   const startIndex = Math.max(9, Math.floor(events.length * 0.5));
   let folds = 0;
   for (let origin = startIndex; origin < events.length - 1; origin += 1) {
     const trainingEvents = events.slice(0, origin + 1);
-    const rows = buildRows(trainingEvents, data, decayHours);
+    const rows = buildRows(trainingEvents, data, decayHours, null, cooldownHours);
     if (!rows.some((row) => row.y === 1)) continue;
     const model = fitLogistic(rows, featureKeys, lambda);
     model.decayHours = decayHours;
+    model.cooldownHours = cooldownHours;
     const originMs = new Date(events[origin].announced_at_utc).getTime();
     const nextMs = new Date(events[origin + 1].announced_at_utc).getTime();
     const forecast = cumulativeForecast(model, data, originMs, originMs, 72);
@@ -429,18 +663,20 @@ function validateCandidate(events, data, featureKeys, lambda, decayHours) {
 }
 
 function selectModel(events, data, fullEligible) {
-  const baselineKeys = ["log_hours_since_last_reset"];
+  const baselineKeys = ["log_hours_since_last_reset", "post_reset_cooldown"];
   const fullKeys = FEATURE_KEYS;
   let best = null;
   const candidates = [];
   for (const variant of fullEligible ? ["baseline", "full"] : ["baseline"]) {
     for (const lambda of LAMBDAS) {
       for (const decayHours of variant === "full" ? DECAYS : [24]) {
-        const featureKeys = variant === "full" ? fullKeys : baselineKeys;
-        const validation = validateCandidate(events, data, featureKeys, lambda, decayHours);
-        const candidate = { variant, lambda, decayHours, featureKeys, validation };
-        candidates.push(candidate);
-        if (!best || validation.objective < best.validation.objective) best = candidate;
+        for (const cooldownHours of COOLDOWN_HOUR_CANDIDATES) {
+          const featureKeys = variant === "full" ? fullKeys : baselineKeys;
+          const validation = validateCandidate(events, data, featureKeys, lambda, decayHours, cooldownHours);
+          const candidate = { variant, lambda, decayHours, cooldownHours, featureKeys, validation };
+          candidates.push(candidate);
+          if (!best || validation.objective < best.validation.objective) best = candidate;
+        }
       }
     }
   }
@@ -448,9 +684,10 @@ function selectModel(events, data, fullEligible) {
   const fullBest = candidates.filter((item) => item.variant === "full").sort((a, b) => a.validation.objective - b.validation.objective)[0] ?? null;
   if (fullBest && fullBest.validation.objective <= baselineBest.validation.objective) best = fullBest;
   else best = baselineBest;
-  const rows = buildRows(events, data, best.decayHours);
+  const rows = buildRows(events, data, best.decayHours, null, best.cooldownHours);
   const model = fitLogistic(rows, best.featureKeys, best.lambda);
   model.decayHours = best.decayHours;
+  model.cooldownHours = best.cooldownHours;
   return { best, baselineBest, model, rows };
 }
 
@@ -458,6 +695,7 @@ function fixedCoefficients(model) {
   const result = {
     intercept: finiteOrNull(model?.beta?.[0]),
     log_hours_since_last_reset: null,
+    post_reset_cooldown: null,
     decayed_tibo_signal: null,
     recent_incident: null,
     recent_release_or_milestone: null,
@@ -523,7 +761,7 @@ function blockedConclusion(reasons) {
   };
 }
 
-function buildConclusion(status, horizons, windows, factors, historyCount) {
+function buildConclusion(status, horizons, windows, factors, historyCount, hasActiveSignal = true) {
   const primary = horizons.find((item) => item.cumulative_probability >= 0.5) ?? horizons.at(-1);
   const topWindow = windows[0] ?? null;
   const probability = primary.cumulative_probability;
@@ -545,24 +783,26 @@ function buildConclusion(status, horizons, windows, factors, historyCount) {
     most_likely_window_probability: topWindow?.window_probability ?? null,
     confidence_level: confidenceLevel,
     confidence_explanation: status === "ok"
-      ? `贝叶斯信号校正模型基于 ${historyCount} 次确认重置及意图—结果配对生成结论。`
-      : `当前采用贝叶斯小样本收缩：以基础生存概率为先验，仅让可比的 Tibo 意图—结果样本有限度地修正概率。`,
+      ? `Tibo 信号延迟模型已通过信号起点滚动回测，并基于 ${historyCount} 次确认重置及意图—结果配对生成结论。`
+      : hasActiveSignal
+        ? `当前信号延迟模型尚未通过信号起点滚动回测，结果按低置信度展示。`
+        : `当前没有尚未兑现的 Tibo 重置信号，使用历史间隔弱基线，结果按低置信度展示。`,
     reason_keys: factors.map((item) => item.feature_key),
   };
 }
 
 function modelOutputTemplate() {
   return {
-    name: "bayesian_signal_adjusted_discrete_survival",
-    version: "2.0.0",
+    name: "tibo_signal_worktime_survival",
+    version: MODEL_VERSION,
     variant: "none",
     status: "blocked",
-    formula: "P(reset≤h|survived to signal_age)=BetaPosterior(BaselineSurvival(h), matched Tibo intent→outcome pairs)",
+    formula: "P(reset≤h|Tibo signal, signal age, post-reset cooldown, work window)=SignalLatencyPosterior(BaselineSurvival(h), matched intent→outcome pairs)",
     coefficients: fixedCoefficients(null),
-    hyperparameters: { time_step_hours: 1, l2_lambda: null, signal_decay_hours: null },
+    hyperparameters: { time_step_hours: 1, l2_lambda: null, signal_decay_hours: null, post_reset_cooldown_hours: null },
     training: { sample_count: 0, positive_count: 0, negative_count: 0, start_at_utc: null, end_at_utc: null },
     validation: {
-      method: "expanding_window",
+      method: "signal_origin_expanding_window",
       fold_count: 0,
       brier_score_4h: null,
       brier_score_24h: null,
@@ -570,11 +810,12 @@ function modelOutputTemplate() {
       log_loss: null,
       calibration_error: null,
       baseline_brier_score_24h: null,
+      latest_holdout: null,
       passed: false,
     },
     signal_adjustment: {
-      method: "time_conditioned_empirical_bayes_beta_binomial",
-      prior_strength: 10,
+      method: "signal_latency_empirical_bayes_with_worktime",
+      prior_strength: SIGNAL_PRIOR_STRENGTH,
       current_signal_post_id: null,
       current_signal_level: null,
       current_signal_intent_class: null,
@@ -584,6 +825,7 @@ function modelOutputTemplate() {
       interval_censored_outcome_count: 0,
       right_censored_count: 0,
       baseline_variant: null,
+      work_timezone: DEFAULT_WORK_TIMEZONE,
     },
   };
 }
@@ -593,17 +835,23 @@ function buildBlockedOutput(input, reasons) {
   const events = input?.events ?? [];
   const signals = input?.signals ?? [];
   return {
-    schema_version: "1.5.0",
+    schema_version: SCHEMA_VERSION,
     file_name: OUTPUT_NAME,
-    site: { file_name: HTML_NAME, data_path: `./${OUTPUT_NAME}`, language: "zh-CN", max_horizon_hours: 72, direct_file_supported: true, access_modes: ["file", "http", "https"], data_loading_priority: ["relative_json", "embedded_snapshot"] },
+    site: { file_name: HTML_NAME, data_path: `./${OUTPUT_NAME}`, local_launcher: `./${LOCAL_LAUNCHER_NAME}`, local_server: `./${LOCAL_SERVER_NAME}`, language: "zh-CN", max_horizon_hours: 72, direct_file_supported: false, access_modes: ["local_http", "http", "https"], data_loading_priority: ["current_page_directory_json", "http_cache_bust"] },
     generated_at_utc: asOf,
     generated_at_beijing: beijingIso(asOf),
     status: "blocked",
     blocked_reasons: reasons.map(String),
+    refresh: input ? buildRefreshOutput(input, confirmedEvents(input)) : {
+      mode: "full_refresh", data_fingerprint: null, checked_at_utc: asOf, last_full_refresh_at_utc: asOf,
+      status_indicator: null, active_incident_id: null, last_confirmed_reset_event_id: null, last_confirmed_reset_at_utc: null,
+      reuse_max_age_minutes: REUSE_MAX_AGE_MINUTES, full_refresh_max_age_hours: FULL_REFRESH_MAX_AGE_HOURS,
+    },
     sources: input?.sources ?? [],
     current: {
       as_of_utc: asOf,
       as_of_beijing: beijingIso(asOf),
+      tibo_work_timezone: input?.current?.tibo_work_timezone ?? DEFAULT_WORK_TIMEZONE,
       last_confirmed_reset_at_utc: null,
       latest_overall_post: input?.current?.latest_overall_post ?? null,
       latest_reset_signal: input?.current?.latest_reset_signal ?? null,
@@ -617,6 +865,7 @@ function buildBlockedOutput(input, reasons) {
       excluded_event_count: events.filter((event) => !event.included_in_training).length,
       events,
       signals,
+      contexts: input?.contexts ?? [],
       intervals: buildIntervals(confirmedEvents(input ?? { events: [] })),
     },
     model: modelOutputTemplate(),
@@ -664,18 +913,17 @@ function runForecast(rawInput) {
   if (events.length < 10) gateReasons.push(`可信重置事件只有 ${events.length} 条，少于基础模型要求的 10 条`);
   if (gateReasons.length) return buildBlockedOutput(data, gateReasons);
 
-  const unmatchedSignals = data.signals.filter((signal) => signal.signal_level > 0 && !signal.matched_reset_event_id).length;
-  const fullEligible = events.length >= 25 && data.signals.length >= 10 && unmatchedSignals >= 3;
-  const { best, baselineBest, model, rows } = selectModel(events, data, fullEligible);
+  const { best, model, rows } = selectModel(events, data, false);
   if (!model.converged) return buildBlockedOutput(data, ["生存回归没有收敛"]);
   const lastReset = events.at(-1);
   const lastResetMs = new Date(lastReset.announced_at_utc).getTime();
   const asOfMs = new Date(data.asOf).getTime();
   if (asOfMs < lastResetMs) return buildBlockedOutput(data, ["当前时间早于最近一次确认重置，存在数据倒退"]);
   const forecast = cumulativeForecast(model, data, lastResetMs, asOfMs);
-  const currentSignal = data.signals.find((signal) => signal.post_id === data.current.latest_reset_signal?.post_id);
-  if (!currentSignal) return buildBlockedOutput(data, ["最新重置信号未纳入意图—结果数据集，无法执行贝叶斯校正"]);
-  const adjustedPoints = bayesianSignalAdjustment(forecast.points, data, currentSignal, asOfMs);
+  const latestSignalRecord = data.signals.find((signal) => signal.post_id === data.current.latest_reset_signal?.post_id) ?? null;
+  const currentSignal = latestSignalRecord && !latestSignalRecord.matched_reset_event_id && latestSignalRecord.outcome_time_kind === "right_censored" ? latestSignalRecord : null;
+  const adjustedPoints = currentSignal ? bayesianSignalAdjustment(forecast.points, data, currentSignal, asOfMs) : baselineAdjustedPoints(forecast.points);
+  const signalValidation = signalWalkForwardValidation(events, data);
   const horizons = adjustedPoints.map((point, index) => {
     const probability = Number(point.probability.toFixed(6));
     const displayProbability = Math.round(point.probability * 100);
@@ -693,7 +941,9 @@ function runForecast(rawInput) {
       confidence_upper: Number(point.confidenceUpper.toFixed(6)),
       signal_posterior: point.posterior,
       reasoning: {
-        model_basis: `基础离散时间生存模型先得到 ${(point.baselineProbability * 100).toFixed(1)}%；贝叶斯层再按当前信号等级、意图类型及“信号已持续 ${((asOfMs - new Date(currentSignal.published_at_utc).getTime()) / 3600_000).toFixed(1)} 小时仍未确认重置”这一条件，使用可比意图—结果样本校正为 ${displayProbability}%（变化 ${(point.signalDelta * 100).toFixed(1)} 个百分点，有效样本权重 ${point.posterior.effective_sample_count.toFixed(2)}）。`,
+        model_basis: currentSignal
+          ? `历史间隔仅提供 ${(point.baselineProbability * 100).toFixed(1)}% 的弱先验；信号主模型按当前等级、意图类型、已等待 ${((asOfMs - new Date(currentSignal.published_at_utc).getTime()) / 3600_000).toFixed(1)} 小时及历史信号—重置延迟，得到 ${displayProbability}%（变化 ${(point.signalDelta * 100).toFixed(1)} 个百分点，有效信号权重 ${point.posterior.effective_sample_count.toFixed(2)}）。具体小时再按 Tibo 当地工作时段分配。`
+          : `当前没有尚未兑现的 Tibo 重置信号，使用历史间隔弱基线 ${(point.baselineProbability * 100).toFixed(1)}%，具体小时按 Tibo 当地工作时段与历史重置小时分布安排。`,
         llm_evidence_summary: context.llm_evidence_summary,
         supporting_factors: context.supporting_factors,
         counter_factors: context.counter_factors,
@@ -703,34 +953,48 @@ function runForecast(rawInput) {
       },
     };
   });
-  const currentFeatures = featureVector(asOfMs + 3600_000, lastResetMs, data, best.decayHours);
-  const validation = best.validation;
+  const currentFeatures = featureVector(asOfMs + 3600_000, lastResetMs, data, best.decayHours, best.cooldownHours);
+  const validation = signalValidation;
   const positives = rows.reduce((sum, row) => sum + row.y, 0);
-  const status = best.variant === "full" ? "ok" : "degraded";
-  const modelStatus = best.variant === "full" ? "trained" : "degraded";
-  const windows = likelyWindows(forecast.hourly);
+  const status = validation.passed && currentSignal ? "ok" : "degraded";
+  const modelStatus = validation.passed && currentSignal ? "trained" : "degraded";
+  const adjustedHourly = currentSignal
+    ? adjustedHourlyForecast(forecast.hourly, adjustedPoints, data, currentSignal, asOfMs)
+    : worktimeHourlyForecast(forecast.hourly, adjustedPoints, data);
+  const windows = likelyWindows(adjustedHourly);
   const factors = explanationFactors(model, currentFeatures, data);
   const representativeSignalDelta = horizons.find((item) => item.horizon_hours === 24)?.signal_probability_delta ?? horizons.at(-1).signal_probability_delta;
+  if (currentSignal) factors.push({
+      feature_key: "tibo_signal_latency_posterior",
+      feature_value: representativeSignalDelta,
+      direction: representativeSignalDelta > 0 ? "increase" : representativeSignalDelta < 0 ? "decrease" : "neutral",
+      contribution_log_odds: 0,
+      evidence_refs: data.sources.filter((source) => source.status === "ok").map((source) => source.evidence_ref),
+      explanation: `当前为 ${currentSignal.intent_class}、等级 ${currentSignal.signal_level}，且已等待 ${((asOfMs - new Date(currentSignal.published_at_utc).getTime()) / 3600_000).toFixed(1)} 小时；信号层按历史意图—真实重置延迟主导各预测范围。`,
+    });
+  const workMultiplier = workWindowMultiplier(asOfMs + 3600_000, data);
   factors.push({
-    feature_key: "tibo_intent_outcome_posterior",
-    feature_value: representativeSignalDelta,
-    direction: representativeSignalDelta > 0 ? "increase" : representativeSignalDelta < 0 ? "decrease" : "neutral",
-    contribution_log_odds: 0,
+    feature_key: "tibo_work_window",
+    feature_value: Number(workMultiplier.toFixed(6)),
+    direction: workMultiplier > 1.05 ? "increase" : workMultiplier < 0.95 ? "decrease" : "neutral",
+    contribution_log_odds: Number(Math.log(Math.max(workMultiplier, 1e-6)).toFixed(6)),
     evidence_refs: data.sources.filter((source) => source.status === "ok").map((source) => source.evidence_ref),
-    explanation: `当前为 ${currentSignal.intent_class}、等级 ${currentSignal.signal_level}，且已等待 ${((asOfMs - new Date(currentSignal.published_at_utc).getTime()) / 3600_000).toFixed(1)} 小时；贝叶斯层按历史意图—真实重置配对修正各预测范围。`,
+    explanation: `按 ${data.current.tibo_work_timezone} 的当地工作时段及历史重置小时分布，为候选小时重新分配概率。`,
   });
   return {
-    schema_version: "1.5.0",
+    schema_version: SCHEMA_VERSION,
     file_name: OUTPUT_NAME,
-    site: { file_name: HTML_NAME, data_path: `./${OUTPUT_NAME}`, language: "zh-CN", max_horizon_hours: 72, direct_file_supported: true, access_modes: ["file", "http", "https"], data_loading_priority: ["relative_json", "embedded_snapshot"] },
+    site: { file_name: HTML_NAME, data_path: `./${OUTPUT_NAME}`, local_launcher: `./${LOCAL_LAUNCHER_NAME}`, local_server: `./${LOCAL_SERVER_NAME}`, language: "zh-CN", max_horizon_hours: 72, direct_file_supported: false, access_modes: ["local_http", "http", "https"], data_loading_priority: ["current_page_directory_json", "http_cache_bust"] },
     generated_at_utc: data.asOf,
     generated_at_beijing: beijingIso(data.asOf),
     status,
     blocked_reasons: [],
+    refresh: buildRefreshOutput(data, events),
     sources: data.sources,
     current: {
       as_of_utc: data.asOf,
       as_of_beijing: beijingIso(data.asOf),
+      tibo_work_timezone: data.current.tibo_work_timezone,
       last_confirmed_reset_at_utc: lastReset.announced_at_utc,
       latest_overall_post: data.current.latest_overall_post,
       latest_reset_signal: data.current.latest_reset_signal,
@@ -744,14 +1008,15 @@ function runForecast(rawInput) {
       excluded_event_count: data.events.filter((event) => !event.included_in_training).length,
       events: data.events,
       signals: data.signals,
+      contexts: data.contexts,
       intervals: buildIntervals(events),
     },
     model: {
       ...modelOutputTemplate(),
-      variant: "bayesian_signal_adjusted",
+      variant: currentSignal ? "signal_primary" : "baseline_fallback",
       status: modelStatus,
       coefficients: fixedCoefficients(model),
-      hyperparameters: { time_step_hours: 1, l2_lambda: best.lambda, signal_decay_hours: best.variant === "full" ? best.decayHours : null },
+      hyperparameters: { time_step_hours: 1, l2_lambda: best.lambda, signal_decay_hours: best.variant === "full" ? best.decayHours : null, post_reset_cooldown_hours: best.cooldownHours },
       training: {
         sample_count: rows.length,
         positive_count: positives,
@@ -760,58 +1025,62 @@ function runForecast(rawInput) {
         end_at_utc: events.at(-1).announced_at_utc,
       },
       validation: {
-        method: "expanding_window",
+        method: validation.method,
         fold_count: validation.folds,
         brier_score_4h: finiteOrNull(validation.metrics[4]),
         brier_score_24h: finiteOrNull(validation.metrics[24]),
         brier_score_72h: finiteOrNull(validation.metrics[72]),
         log_loss: null,
         calibration_error: null,
-        baseline_brier_score_24h: finiteOrNull(baselineBest.validation.metrics[24]),
-        passed: validation.folds > 0 && Number.isFinite(validation.objective),
+        baseline_brier_score_24h: finiteOrNull(validation.baselineMetrics[24]),
+        latest_holdout: validation.latestHoldout,
+        passed: validation.passed,
       },
       signal_adjustment: {
-        method: "time_conditioned_empirical_bayes_beta_binomial",
-        prior_strength: 10,
-        current_signal_post_id: currentSignal.post_id,
-        current_signal_level: currentSignal.signal_level,
-        current_signal_intent_class: currentSignal.intent_class,
-        current_signal_age_hours: Number(((asOfMs - new Date(currentSignal.published_at_utc).getTime()) / 3600_000).toFixed(3)),
-        historical_intent_count: data.signals.filter((item) => item.post_id !== currentSignal.post_id && item.signal_level > 0).length,
+        method: "signal_latency_empirical_bayes_with_worktime",
+        prior_strength: SIGNAL_PRIOR_STRENGTH,
+        current_signal_post_id: currentSignal?.post_id ?? null,
+        current_signal_level: currentSignal?.signal_level ?? null,
+        current_signal_intent_class: currentSignal?.intent_class ?? null,
+        current_signal_age_hours: currentSignal ? Number(((asOfMs - new Date(currentSignal.published_at_utc).getTime()) / 3600_000).toFixed(3)) : null,
+        historical_intent_count: data.signals.filter((item) => item.post_id !== currentSignal?.post_id && item.signal_level > 0).length,
         exact_outcome_count: data.signals.filter((item) => item.outcome_time_kind === "exact").length,
         interval_censored_outcome_count: data.signals.filter((item) => item.outcome_time_kind === "interval_censored").length,
         right_censored_count: data.signals.filter((item) => item.outcome_time_kind === "right_censored").length,
         baseline_variant: best.variant,
+        work_timezone: data.current.tibo_work_timezone,
       },
     },
     forecast: {
       horizons,
       most_likely_windows: windows,
     },
-    conclusion: buildConclusion(status, horizons, windows, factors, events.length),
+    conclusion: buildConclusion(status, horizons, windows, factors, events.length, Boolean(currentSignal)),
     explanation: {
-      summary: "先由离散时间生存回归计算历史基准概率，再以贝叶斯小样本模型按 Tibo 意图等级、承诺窗口、真实落地时间和当前等待时长进行收缩校正；LLM 只解释证据。",
+      summary: "以 Tibo 信号等级和历史信号—重置延迟为主模型；等级 4 只表示已完成，重置后冷却与历史间隔形成弱基线，再按当地工作时段分配具体小时概率；LLM 只解释证据。",
       factors,
-      limitations: ["Tibo 意图—结果配对样本仍少，区间时间只按区间删失处理，可信区间使用正态近似；因此信号校正会强烈向历史基准收缩。"],
+      limitations: ["Tibo 意图—结果配对样本仍少，部分落地时间为区间删失；工作时段使用配置时区与历史小时分布，不以国籍直接推定。"],
       risk_notice: "这是根据公开历史记录建立的统计模型，不是 OpenAI 官方时间表。",
     },
   };
 }
 
 function validateOutput(output) {
-  const requiredTop = ["schema_version", "file_name", "site", "generated_at_utc", "generated_at_beijing", "status", "blocked_reasons", "sources", "current", "history", "model", "forecast", "conclusion", "explanation"];
+  const requiredTop = ["schema_version", "file_name", "site", "generated_at_utc", "generated_at_beijing", "status", "blocked_reasons", "refresh", "sources", "current", "history", "model", "forecast", "conclusion", "explanation"];
   for (const key of requiredTop) if (!(key in output)) throw new Error(`输出缺少固定 key：${key}`);
   if (output.file_name !== OUTPUT_NAME) throw new Error("输出文件名契约不一致");
-  if (output.site?.file_name !== HTML_NAME || output.site?.data_path !== `./${OUTPUT_NAME}` || output.site?.max_horizon_hours !== 72 || output.site?.direct_file_supported !== true || JSON.stringify(output.site?.access_modes) !== JSON.stringify(["file", "http", "https"]) || JSON.stringify(output.site?.data_loading_priority) !== JSON.stringify(["relative_json", "embedded_snapshot"])) throw new Error("静态网站契约不一致");
+  if (output.site?.file_name !== HTML_NAME || output.site?.data_path !== `./${OUTPUT_NAME}` || output.site?.local_launcher !== `./${LOCAL_LAUNCHER_NAME}` || output.site?.local_server !== `./${LOCAL_SERVER_NAME}` || output.site?.max_horizon_hours !== 72 || output.site?.direct_file_supported !== false || JSON.stringify(output.site?.access_modes) !== JSON.stringify(["local_http", "http", "https"]) || JSON.stringify(output.site?.data_loading_priority) !== JSON.stringify(["current_page_directory_json", "http_cache_bust"])) throw new Error("静态网站契约不一致");
   if (!new Set(["ok", "degraded", "blocked"]).has(output.status)) throw new Error("status 枚举无效");
-  if (!Array.isArray(output.history.events) || !Array.isArray(output.history.signals) || !Array.isArray(output.history.intervals)) throw new Error("history 数组结构无效");
+  if (!Array.isArray(output.history.events) || !Array.isArray(output.history.signals) || !Array.isArray(output.history.contexts) || !Array.isArray(output.history.intervals)) throw new Error("history 数组结构无效");
+  if (output.refresh.mode !== "full_refresh" || !output.refresh.checked_at_utc || !output.refresh.last_full_refresh_at_utc) throw new Error("refresh 结构无效");
   const signalKeys = ["post_id", "published_at_utc", "url", "text", "signal_level", "intent_class", "has_explicit_timing", "promised_window_end_at_utc", "outcome_status", "outcome_time_kind", "reset_at_utc", "latency_lower_hours", "latency_upper_hours", "observation_end_at_utc", "confidence", "classification_evidence", "matched_reset_event_id", "hours_to_reset", "reset_within_4h", "reset_within_24h", "reset_within_72h"];
   for (const signal of output.history.signals) {
     if (JSON.stringify(Object.keys(signal)) !== JSON.stringify(signalKeys)) throw new Error("历史意图—结果记录固定 key 不一致");
     if (!new Set(["weak_mention", "directional_reset", "explicit_commitment"]).has(signal.intent_class)) throw new Error("历史信号 intent_class 无效");
     if (!new Set(["exact", "interval_censored", "right_censored"]).has(signal.outcome_time_kind)) throw new Error("历史信号 outcome_time_kind 无效");
+    if (signal.signal_level < 0 || signal.signal_level > 3) throw new Error("历史预测信号等级必须为 0—3");
   }
-  if (output.status !== "blocked" && (output.model.name !== "bayesian_signal_adjusted_discrete_survival" || output.model.variant !== "bayesian_signal_adjusted" || output.model.signal_adjustment?.method !== "time_conditioned_empirical_bayes_beta_binomial")) throw new Error("贝叶斯模型输出契约不一致");
+  if (output.status !== "blocked" && (output.model.name !== "tibo_signal_worktime_survival" || !new Set(["signal_primary", "baseline_fallback"]).has(output.model.variant) || output.model.signal_adjustment?.method !== "signal_latency_empirical_bayes_with_worktime")) throw new Error("信号主模型输出契约不一致");
   if (!Array.isArray(output.current.recent_tibo_posts)) throw new Error("近期 Tibo 动态结构无效");
   if (output.status !== "blocked" && (output.current.recent_tibo_posts.length < 3 || output.current.recent_tibo_posts.length > 6)) throw new Error("近期 Tibo 动态数量必须为 3—6 条");
   const recentPostKeys = ["post_id", "published_at_utc", "url", "text_original", "text_zh", "translation_method", "post_type", "signal_level", "classification_evidence", "is_latest_overall", "is_latest_reset_signal"];
@@ -819,7 +1088,10 @@ function validateOutput(output) {
     if (JSON.stringify(Object.keys(post)) !== JSON.stringify(recentPostKeys)) throw new Error("近期 Tibo 动态固定 key 不一致");
     if (!post.text_original || !post.text_zh || post.translation_method !== "chatgpt") throw new Error("近期 Tibo 动态双语内容不完整");
     if (!new Set(["reset_signal", "codex", "limits", "release", "other"]).has(post.post_type)) throw new Error("近期 Tibo 动态类型无效");
+    if (post.signal_level < 0 || post.signal_level > 4) throw new Error("近期 Tibo 动态等级必须为 0—4");
   }
+  const latestResetPost = output.current.recent_tibo_posts.find((post) => post.is_latest_reset_signal);
+  if (latestResetPost && output.current.latest_reset_signal && latestResetPost.post_id === output.current.latest_reset_signal.post_id && latestResetPost.signal_level !== output.current.latest_reset_signal.signal_level) throw new Error("最新重置相关动态等级在当前对象和近期列表中不一致");
   if (!Array.isArray(output.forecast.horizons) || !Array.isArray(output.explanation.factors)) throw new Error("forecast 或 explanation 结构无效");
   if (!Array.isArray(output.conclusion.reason_keys) || !new Set(["low", "medium", "high", "unavailable"]).has(output.conclusion.confidence_level)) throw new Error("conclusion 结构无效");
   if (output.forecast.horizons.some((row) => row.horizon_hours > 72)) throw new Error("预测范围不得超过 72 小时");
@@ -829,7 +1101,7 @@ function validateOutput(output) {
     if (!Number.isFinite(row.cumulative_probability) || row.cumulative_probability < 0 || row.cumulative_probability > 1) throw new Error("预测概率越界");
     if (row.cumulative_probability < previous) throw new Error("累计概率不是单调递增");
     if (row.display_probability_percent !== Math.round(row.cumulative_probability * 100)) throw new Error("展示百分比与原始概率不一致");
-    if (!Number.isFinite(row.baseline_probability) || !Number.isFinite(row.signal_probability_delta) || !row.signal_posterior) throw new Error("贝叶斯信号校正字段不完整");
+    if (!Number.isFinite(row.baseline_probability) || !Number.isFinite(row.signal_probability_delta) || !row.signal_posterior) throw new Error("信号主模型字段不完整");
     if (!Number.isFinite(row.confidence_lower) || !Number.isFinite(row.confidence_upper) || row.confidence_lower > row.cumulative_probability || row.confidence_upper < row.cumulative_probability) throw new Error("概率区间无效");
     const reasoningKeys = ["model_basis", "llm_evidence_summary", "supporting_factors", "counter_factors", "cumulative_effect", "uncertainty", "evidence_refs"];
     if (JSON.stringify(Object.keys(row.reasoning ?? {})) !== JSON.stringify(reasoningKeys)) throw new Error("逐预测范围推理固定 key 不一致");
@@ -851,27 +1123,114 @@ function writeAtomic(output, outputPath) {
   fs.renameSync(temporary, outputPath);
 }
 
-function readEmbeddedOutput(html) {
-  const match = html.match(/<script type="application\/json" id="embedded-forecast-data">([\s\S]*?)<\/script>/);
-  if (!match) throw new Error("HTML 缺少内置预测快照");
-  return JSON.parse(match[1]);
+async function postGeneratedJson(outputPath, postUrl) {
+  const target = new URL(postUrl);
+  if (target.protocol !== "http:" && target.protocol !== "https:") throw new Error("--post-url 只支持 HTTP 或 HTTPS URL");
+  const body = fs.readFileSync(outputPath, "utf8");
+  JSON.parse(body);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let response;
+  try {
+    response = await fetch(target, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8", Accept: "application/json" },
+      body,
+      redirect: "error",
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!response.ok) throw new Error(`JSON POST 提交失败：HTTP ${response.status}`);
+  return { url: target.href, status: response.status, content_type: response.headers.get("content-type") };
 }
 
-function writeHtmlAtomic(output, outputPath) {
+function migrateDisplayContract(output) {
+  return {
+    ...output,
+    schema_version: SCHEMA_VERSION,
+    site: {
+      file_name: HTML_NAME,
+      data_path: `./${OUTPUT_NAME}`,
+      local_launcher: `./${LOCAL_LAUNCHER_NAME}`,
+      local_server: `./${LOCAL_SERVER_NAME}`,
+      language: "zh-CN",
+      max_horizon_hours: 72,
+      direct_file_supported: false,
+      access_modes: ["local_http", "http", "https"],
+      data_loading_priority: ["current_page_directory_json", "http_cache_bust"],
+    },
+  };
+}
+
+function writeHtmlAtomic(_output, outputPath) {
   const directory = path.dirname(outputPath);
   const target = path.join(directory, HTML_NAME);
   const temporary = path.join(directory, `.${HTML_NAME}.tmp`);
   const template = fs.readFileSync(HTML_TEMPLATE, "utf8");
-  if (!template.includes(`const DATA_PATH = "./${OUTPUT_NAME}";`) || !template.includes('lang="zh-CN"') || !template.includes("__CODEX_FORECAST_JSON__")) throw new Error("HTML 模板不符合相对数据路径、中文或内置快照契约");
-  const embedded = JSON.stringify(output).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
-  const html = template.replace("__CODEX_FORECAST_JSON__", embedded);
-  if (html.includes("__CODEX_FORECAST_JSON__")) throw new Error("HTML 内置快照替换失败");
-  fs.writeFileSync(temporary, html, { encoding: "utf8" });
-  const embeddedOutput = readEmbeddedOutput(fs.readFileSync(temporary, "utf8"));
-  validateOutput(embeddedOutput);
-  if (JSON.stringify(embeddedOutput) !== JSON.stringify(output)) throw new Error("HTML 内置快照与 JSON 输出不一致");
+  if (!template.includes(`const DATA_FILE = "${OUTPUT_NAME}";`) || !template.includes('lang="zh-CN"') || !template.includes('new URL("./", location.href)') || !template.includes('new URL(DATA_FILE, pageDirectoryUrl)') || !template.includes('searchParams.set("_t"') || template.includes('location.protocol') || template.includes('type="file"')) throw new Error("HTML 模板不符合纯网络同目录 JSON 加载契约");
+  if (template.includes("embedded-forecast-data") || template.includes('type="application/json"') || template.includes("__CODEX_FORECAST_JSON__")) throw new Error("HTML 模板禁止包含内置预测数据");
+  fs.writeFileSync(temporary, template, { encoding: "utf8" });
+  const reread = fs.readFileSync(temporary, "utf8");
+  if (reread.includes("embedded-forecast-data") || reread.includes('type="application/json"')) throw new Error("HTML 输出包含内置预测数据");
   fs.renameSync(temporary, target);
+  for (const [source, name] of [[LOCAL_SERVER_TEMPLATE, LOCAL_SERVER_NAME], [LOCAL_LAUNCHER_TEMPLATE, LOCAL_LAUNCHER_NAME]]) {
+    const assetTemporary = path.join(directory, `.${name}.tmp`);
+    fs.writeFileSync(assetTemporary, fs.readFileSync(source, "utf8"), { encoding: "utf8" });
+    fs.renameSync(assetTemporary, path.join(directory, name));
+  }
   return target;
+}
+
+function normalizeProbe(rawProbe) {
+  const checkedAt = iso(rawProbe?.checked_at_utc, "probe.checked_at_utc");
+  const sources = Array.isArray(rawProbe?.sources) ? rawProbe.sources.map((source) => ({
+    source_id: String(source.source_id ?? ""), name: String(source.name ?? ""), url: String(source.url ?? ""),
+    retrieved_at_utc: iso(source.retrieved_at_utc, "probe.source.retrieved_at_utc"),
+    retrieval_method: String(source.retrieval_method ?? ""), status: String(source.status ?? "failed"),
+    fresh: Boolean(source.fresh), evidence_ref: String(source.evidence_ref ?? ""),
+  })) : [];
+  return {
+    checkedAt,
+    sources,
+    latestOverallPost: rawProbe?.latest_overall_post ?? null,
+    latestResetSignal: rawProbe?.latest_reset_signal ?? null,
+    lastResetEventId: rawProbe?.last_confirmed_reset?.event_id == null ? null : String(rawProbe.last_confirmed_reset.event_id),
+    lastResetAt: rawProbe?.last_confirmed_reset?.announced_at_utc ? iso(rawProbe.last_confirmed_reset.announced_at_utc, "probe.last_confirmed_reset.announced_at_utc") : null,
+    statusIndicator: rawProbe?.status_indicator == null ? null : String(rawProbe.status_indicator),
+    activeIncidentId: rawProbe?.active_incident_id == null ? null : String(rawProbe.active_incident_id),
+  };
+}
+
+function probeFailure(reason) {
+  return { action: "full_refresh", reason, wrote_files: false };
+}
+
+function runRefreshProbe(rawProbe, existingPath, outputPath) {
+  void rawProbe;
+  void existingPath;
+  void outputPath;
+  return probeFailure("指纹短路已停用；每次执行都必须继续完整刷新流程");
+}
+
+function runBacktest(rawInput) {
+  const data = normalizeInput(rawInput);
+  const events = confirmedEvents(data);
+  if (events.length < 10) throw new Error("回测至少需要 10 次可信重置事件");
+  const validation = signalWalkForwardValidation(events, data);
+  return {
+    model: "tibo_signal_worktime_survival",
+    version: MODEL_VERSION,
+    training_rule: "每一折只使用该 Tibo 信号之前的数据；latest_holdout 不进入训练",
+    work_timezone: data.current.tibo_work_timezone,
+    fold_count: validation.folds,
+    signal_brier: validation.metrics,
+    baseline_brier: validation.baselineMetrics,
+    latest_holdout: validation.latestHoldout,
+    passed: validation.passed,
+    fold_details: validation.fold_details,
+  };
 }
 
 function syntheticInput() {
@@ -963,6 +1322,10 @@ function syntheticInput() {
 }
 
 function selfTest() {
+  const unicodeSample = '{"text":"中文编码校验"}';
+  const encodedSample = Buffer.from(unicodeSample, "utf8").toString("base64");
+  if (readInputText(null, encodedSample) !== unicodeSample) throw new Error("自检 UTF-8 Base64 输入通道失败");
+  if (normalizeRecentPost({ post_id: "done", published_at_utc: new Date().toISOString(), signal_level: 4 }).signal_level !== 4) throw new Error("自检已完成重置等级 4 被错误降级");
   const output = runForecast(syntheticInput());
   validateOutput(output);
   if (output.status === "blocked") throw new Error(`自检被意外阻断：${output.blocked_reasons.join("；")}`);
@@ -980,32 +1343,59 @@ function selfTest() {
   const reread = JSON.parse(fs.readFileSync(target, "utf8"));
   validateOutput(reread);
   if (!fs.existsSync(htmlTarget)) throw new Error("自检未生成固定 HTML 文件");
+  if (!fs.existsSync(path.join(temporaryDirectory, LOCAL_SERVER_NAME)) || !fs.existsSync(path.join(temporaryDirectory, LOCAL_LAUNCHER_NAME))) throw new Error("自检未生成本地启动文件");
+  const html = fs.readFileSync(htmlTarget, "utf8");
+  if (html.includes("embedded-forecast-data") || html.includes('type="application/json"') || html.includes('type="file"') || html.includes('location.protocol') || !html.includes('new URL("./", location.href)') || !html.includes('new URL(DATA_FILE, pageDirectoryUrl)') || !html.includes('searchParams.set("_t"')) throw new Error("自检 HTML 纯网络同目录加载契约失败");
+  const lastReset = output.history.events.filter((event) => event.event_type === "confirmed_reset" && event.included_in_training).at(-1);
+  const probeResult = runRefreshProbe({
+    checked_at_utc: output.generated_at_utc,
+    sources: [{ source_id: "probe", name: "probe", url: "https://example.com/probe", retrieved_at_utc: output.generated_at_utc, retrieval_method: "chatgpt_remote_web_search", status: "ok", fresh: true, evidence_ref: "source:probe" }],
+    latest_overall_post: output.current.latest_overall_post,
+    latest_reset_signal: output.current.latest_reset_signal,
+    last_confirmed_reset: { event_id: lastReset.event_id, announced_at_utc: lastReset.announced_at_utc },
+    status_indicator: output.refresh.status_indicator,
+    active_incident_id: output.refresh.active_incident_id,
+  }, target, target);
+  if (probeResult.action !== "full_refresh" || probeResult.wrote_files || !probeResult.reason.includes("指纹短路已停用")) throw new Error("自检未强制进入完整刷新路径");
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   process.stdout.write("forecast self-test passed\n");
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.selfTest) return selfTest();
-  if (args.renderExisting) {
-    const output = JSON.parse(fs.readFileSync(args.renderExisting, "utf8"));
-    validateOutput(output);
-    const htmlOutput = writeHtmlAtomic(output, args.renderExisting);
-    process.stdout.write(`${JSON.stringify({ status: output.status, output: args.renderExisting, html_output: htmlOutput, render_only: true })}\n`);
+  if (args.backtest) {
+    const inputText = args.backtest === "-" ? fs.readFileSync(0, "utf8") : fs.readFileSync(path.resolve(args.backtest), "utf8");
+    process.stdout.write(`${JSON.stringify(runBacktest(JSON.parse(inputText)), null, 2)}\n`);
     return;
   }
-  if (!args.input) throw new Error("必须提供 --input <remote-snapshot.json>");
-  const inputText = args.input === "-" ? fs.readFileSync(0, "utf8") : fs.readFileSync(path.resolve(args.input), "utf8");
+  if (args.renderExisting) {
+    const output = migrateDisplayContract(JSON.parse(fs.readFileSync(args.renderExisting, "utf8")));
+    validateOutput(output);
+    writeAtomic(output, args.renderExisting);
+    const htmlOutput = writeHtmlAtomic(output, args.renderExisting);
+    const postResult = args.postUrl ? await postGeneratedJson(args.renderExisting, args.postUrl) : null;
+    process.stdout.write(`${JSON.stringify({ status: output.status, output: args.renderExisting, html_output: htmlOutput, render_only: true, display_contract_migrated: true, post_result: postResult })}\n`);
+    return;
+  }
+  if (args.probeBase64) {
+    const rawProbe = JSON.parse(readInputText(null, args.probeBase64));
+    const result = runRefreshProbe(rawProbe, args.existing, args.output);
+    if (args.postUrl) result.post_deferred = true;
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (!args.input && !args.inputBase64) throw new Error("必须提供 --input <remote-snapshot.json> 或 --input-base64 <base64|->");
+  const inputText = readInputText(args.input, args.inputBase64);
   const rawInput = JSON.parse(inputText);
   const output = runForecast(rawInput);
   writeAtomic(output, args.output);
   const htmlOutput = writeHtmlAtomic(output, args.output);
-  process.stdout.write(`${JSON.stringify({ status: output.status, output: args.output, html_output: htmlOutput, blocked_reasons: output.blocked_reasons })}\n`);
+  const postResult = args.postUrl ? await postGeneratedJson(args.output, args.postUrl) : null;
+  process.stdout.write(`${JSON.stringify({ status: output.status, output: args.output, html_output: htmlOutput, blocked_reasons: output.blocked_reasons, post_result: postResult })}\n`);
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   process.stderr.write(`${error.stack ?? error.message}\n`);
   process.exitCode = 1;
-}
+});

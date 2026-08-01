@@ -13,3 +13,5 @@ workspace/*
 
 codex-reset-forecast.json
 /codex.html
+/open-codex.cmd
+/codex-local-server.mjs

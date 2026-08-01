@@ -1,8 +1,9 @@
 interface:
-  display_name: codex reset forecast
-  short_description: 远程抓取 Tibo 与历史重置数据，生成固定 JSON、双语动态和支持双击/HTTP 的中文预测页。
-  icon_small: assets/icon.svg
-  icon_large: assets/icon.svg
+  display_name: "Codex Reset Forecast"
+  short_description: "基于 Tibo 信号、工作时段和历史延迟预测 Codex 重置"
+  icon_small: "assets/icon.svg"
+  icon_large: "assets/icon.svg"
+  default_prompt: "使用 $codex-reset-forecast 抓取最新 Tibo 动态并预测下一次 Codex 全局重置。"
 policy:
   products:
   - chatgpt

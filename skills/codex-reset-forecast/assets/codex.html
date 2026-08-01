@@ -152,8 +152,12 @@
     th, td { padding: 12px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
     th { color: var(--muted); font-weight: 600; }
     td { color: #c9d9e6; }
-    .reason-toggle { padding: 6px 10px; border: 1px solid rgba(90,156,255,.34); border-radius: 9px; color: #a9caff; background: rgba(90,156,255,.1); cursor: pointer; }
-    .reason-toggle:hover { border-color: rgba(90,156,255,.62); }
+    .forecast-row { cursor: pointer; }
+    .forecast-row:hover td, .forecast-row:focus-visible td, .forecast-row[aria-expanded="true"] td { background: rgba(90,156,255,.08); }
+    .forecast-row:focus-visible { outline: 2px solid rgba(90,156,255,.62); outline-offset: -2px; }
+    .forecast-row td:first-child::before { content: "›"; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin-right: 8px; border: 1px solid rgba(90,156,255,.34); border-radius: 6px; color: #8fc1ff; background: rgba(90,156,255,.1); font-size: 18px; line-height: 1; vertical-align: -2px; transition: transform .18s ease, border-color .18s ease, background-color .18s ease; }
+    .forecast-row:hover td:first-child::before, .forecast-row:focus-visible td:first-child::before { border-color: rgba(90,156,255,.68); background: rgba(90,156,255,.18); }
+    .forecast-row[aria-expanded="true"] td:first-child::before { transform: rotate(90deg); }
     .reason-row td { padding: 0 10px 14px; white-space: normal; }
     .reason-card { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px; border: 1px solid rgba(90,156,255,.22); border-radius: 14px; background: rgba(8,22,38,.78); }
     .reason-block { min-width: 0; }
@@ -208,6 +212,7 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; }
     }
+
   </style>
 </head>
 <body>
@@ -221,7 +226,7 @@
 
   <main class="shell">
     <div class="notice" id="notice" role="alert"></div>
-    <div class="loading" id="loading"><div><div class="loader"></div><div>正在读取最新预测数据…</div></div></div>
+    <div class="loading" id="loading"><div><div class="loader" id="loader"></div><div id="loading-text">正在读取最新预测数据…</div></div></div>
     <div id="app" hidden>
       <section class="panel hero">
         <div>
@@ -265,12 +270,12 @@
       </section>
 
       <section class="panel section standalone">
-        <div class="section-head"><div><h2>为什么这样判断</h2><div class="section-subtitle" id="confidence-explanation">模型因素的方向和贡献</div></div></div>
+        <div class="section-head"><div><h2>为什么这样判断</h2></div></div>
         <div class="factor-list" id="factor-list"></div>
       </section>
 
       <section class="panel section standalone">
-        <div class="section-head"><div><h2>Tibo 近期动态</h2><div class="section-subtitle">中文翻译便于阅读，英文原文作为事实依据；动态不等同官方重置承诺</div></div></div>
+        <div class="section-head"><div><h2>Tibo 近期动态</h2></div></div>
         <div class="tibo-grid" id="tibo-list"></div>
       </section>
 
@@ -278,7 +283,7 @@
         <div class="section-head"><div><h2>数据与模型明细</h2></div></div>
         <details open>
           <summary>预测概率明细</summary>
-          <div class="details-body table-wrap"><table class="forecast-table"><thead><tr><th>预测范围</th><th>截止时间（北京时间）</th><th>贝叶斯校正概率</th><th>模型状态</th><th>推理依据</th></tr></thead><tbody id="forecast-table"></tbody></table></div>
+          <div class="details-body table-wrap"><table class="forecast-table"><thead><tr><th>预测范围</th><th>截止时间（北京时间）</th><th>贝叶斯校正概率</th><th>模型状态</th></tr></thead><tbody id="forecast-table"></tbody></table></div>
         </details>
         <details open>
           <summary>最近历史重置</summary>
@@ -299,10 +304,9 @@
   </main>
   <footer class="shell">Codex Reset Forecast · 统计预测不代表 OpenAI 官方时间表</footer>
 
-  <script type="application/json" id="embedded-forecast-data">__CODEX_FORECAST_JSON__</script>
   <script>
     "use strict";
-    const DATA_PATH = "./codex-reset-forecast.json";
+    const DATA_FILE = "codex-reset-forecast.json";
     const ns = "http://www.w3.org/2000/svg";
     const $ = (id) => document.getElementById(id);
     const setText = (id, value) => { $(id).textContent = value == null || value === "" ? "—" : String(value); };
@@ -330,7 +334,7 @@
     const safeUrl = (value) => { try { const url = new URL(value); return url.protocol === "https:" ? url.href : null; } catch { return null; } };
     const node = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text != null) element.textContent = text; return element; };
     const svgNode = (tag, attrs = {}) => { const element = document.createElementNS(ns, tag); Object.entries(attrs).forEach(([key, value]) => element.setAttribute(key, value)); return element; };
-    const modelLabel = { trained: "贝叶斯信号模型", degraded: "贝叶斯收缩模型", blocked: "已阻断" };
+    const modelLabel = { trained: "Tibo 信号模型", degraded: "信号模型（低置信度）", blocked: "已阻断" };
     const confidenceLabel = { low: "较低", medium: "中等", high: "较高", unavailable: "不可用" };
     const featureLabel = {
       log_hours_since_last_reset: "距上次重置时间",
@@ -339,13 +343,13 @@
       recent_release_or_milestone: "近期发布或里程碑",
       utc_hour_sin: "UTC 时段周期（正弦）",
       utc_hour_cos: "UTC 时段周期（余弦）",
-      tibo_intent_outcome_posterior: "Tibo 意图—结果校正"
+      tibo_signal_latency_posterior: "Tibo 信号—重置延迟",
+      tibo_work_window: "Tibo 当地工作时段"
     };
 
-    function readEmbeddedData() {
-      const element = $("embedded-forecast-data");
-      if (!element || !element.textContent.trim()) throw new Error("HTML 未包含预测快照");
-      return JSON.parse(element.textContent);
+    function validateData(data) {
+      if (!data || !data.conclusion || !data.forecast || !data.model || !data.history || !Array.isArray(data.forecast.horizons)) throw new Error("JSON 结构不完整");
+      return data;
     }
 
     function showNotice(message, isError = false) {
@@ -415,7 +419,7 @@
         const meta = node("div", "tibo-meta");
         meta.append(node("span", "", localTime(post.published_at_utc, true)));
         if (post.is_latest_overall) meta.append(node("span", "tibo-tag", "最新动态"));
-        if (post.is_latest_reset_signal) meta.append(node("span", "tibo-tag signal", `重置信号 Lv.${post.signal_level}`));
+        if (post.is_latest_reset_signal) meta.append(node("span", "tibo-tag signal", post.signal_level === 4 ? "已完成重置 Lv.4" : `重置信号 Lv.${post.signal_level}`));
         else meta.append(node("span", "tibo-tag", post.post_type === "codex" ? "Codex" : post.post_type === "limits" ? "额度相关" : post.post_type === "release" ? "产品发布" : "其他动态"));
         const chinese = node("p", "tibo-zh", post.text_zh); chinese.lang = "zh-CN";
         const original = node("p", "tibo-en", post.text_original); original.lang = "en";
@@ -453,19 +457,25 @@
 
     function renderTables(data) {
       const forecastBody = $("forecast-table"); forecastBody.replaceChildren();
-      data.forecast.horizons.forEach((item) => {
+      data.forecast.horizons.forEach((item, index) => {
         const row = document.createElement("tr");
+        row.className = "forecast-row";
+        row.tabIndex = 0;
+        row.setAttribute("role", "button");
+        row.setAttribute("aria-expanded", "false");
+        row.setAttribute("aria-label", `展开计算后 ${item.horizon_hours} 小时的推理详情`);
+        row.title = "点击整行展开推理详情";
         row.dataset.deadline = item.deadline_utc;
         row.dataset.modelStatus = modelLabel[data.model.status] || data.model.status;
         row.append(node("td", "", `计算后 ${item.horizon_hours} 小时`), node("td", "", localTime(item.deadline_beijing, true)), node("td", "", `${item.display_probability_percent}%（基线 ${Math.round(item.baseline_probability * 100)}%，校正 ${item.signal_probability_delta >= 0 ? "+" : ""}${(item.signal_probability_delta * 100).toFixed(1)}pp）`));
         const statusCell = node("td", "model-status-cell", row.dataset.modelStatus);
-        const actionCell = node("td");
-        const toggle = node("button", "reason-toggle", "查看完整理由");
-        toggle.type = "button"; toggle.setAttribute("aria-expanded", "false");
-        actionCell.append(toggle); row.append(statusCell, actionCell);
-        const reasonRow = node("tr", "reason-row"); reasonRow.hidden = true;
-        const reasonCell = node("td"); reasonCell.colSpan = 5; reasonCell.append(renderHorizonReasoning(item.reasoning)); reasonRow.append(reasonCell);
-        toggle.addEventListener("click", () => { reasonRow.hidden = !reasonRow.hidden; toggle.setAttribute("aria-expanded", String(!reasonRow.hidden)); toggle.textContent = reasonRow.hidden ? "查看完整理由" : "收起理由"; });
+        row.append(statusCell);
+        const reasonRow = node("tr", "reason-row"); reasonRow.id = `forecast-reason-${index}`; reasonRow.hidden = true;
+        row.setAttribute("aria-controls", reasonRow.id);
+        const reasonCell = node("td"); reasonCell.colSpan = 4; reasonCell.append(renderHorizonReasoning(item.reasoning)); reasonRow.append(reasonCell);
+        const toggleReason = () => { reasonRow.hidden = !reasonRow.hidden; row.setAttribute("aria-expanded", String(!reasonRow.hidden)); row.setAttribute("aria-label", `${reasonRow.hidden ? "展开" : "收起"}计算后 ${item.horizon_hours} 小时的推理详情`); row.title = reasonRow.hidden ? "点击整行展开推理详情" : "点击整行收起推理详情"; };
+        row.addEventListener("click", toggleReason);
+        row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleReason(); } });
         forecastBody.append(row, reasonRow);
       });
       const historyBody = $("history-table"); historyBody.replaceChildren();
@@ -482,10 +492,11 @@
       const target = $("model-grid"); target.replaceChildren();
       const validation = data.model.validation;
       const values = [
-        ["模型", data.model.name], ["模型版本", data.model.version], ["模型变体", data.model.variant],
+        ["模型", data.model.name], ["模型版本", data.model.version], ["模型变体", data.model.variant], ["刷新模式", data.refresh?.mode],
         ["训练样本", data.model.training.sample_count], ["正样本", data.model.training.positive_count], ["回测折数", validation.fold_count],
         ["4h Brier", validation.brier_score_4h?.toFixed(4)], ["24h Brier", validation.brier_score_24h?.toFixed(4)], ["72h Brier", validation.brier_score_72h?.toFixed(4)],
-        ["信号校正", data.model.signal_adjustment?.method], ["当前信号等级", data.model.signal_adjustment?.current_signal_level], ["当前信号已等待", `${data.model.signal_adjustment?.current_signal_age_hours ?? "—"} 小时`],
+        ["信号模型", data.model.signal_adjustment?.method], ["当前信号等级", data.model.signal_adjustment?.current_signal_level], ["当前信号已等待", `${data.model.signal_adjustment?.current_signal_age_hours ?? "—"} 小时`],
+        ["Tibo 工作时区", data.model.signal_adjustment?.work_timezone], ["最新留出样本", validation.latest_holdout?.post_id], ["回测结果", validation.passed ? "通过" : "未通过"],
         ["历史意图样本", data.model.signal_adjustment?.historical_intent_count], ["精确结果", data.model.signal_adjustment?.exact_outcome_count], ["区间删失结果", data.model.signal_adjustment?.interval_censored_outcome_count]
       ];
       values.forEach(([label, value]) => { const item = node("div", "model-item"); item.append(node("span", "", label), node("strong", "", value ?? "—")); target.append(item); });
@@ -510,7 +521,7 @@
       renderChart(data.forecast.horizons, now);
       if (data.status !== "blocked") {
         $("status-dot").className = data.status === "degraded" ? "status-dot warn" : "status-dot";
-        setText("status-text", data.status === "degraded" ? "贝叶斯模型" : "预测数据有效");
+        setText("status-text", data.status === "degraded" ? "信号模型（低置信度）" : "信号模型已回测");
       }
     }
 
@@ -533,7 +544,6 @@
       setText("likely-window-prob", conclusion.most_likely_window_probability == null ? "未生成时间窗口" : `该 4 小时窗口概率 ${percent(conclusion.most_likely_window_probability)}`);
       setText("sample-count", `${data.history.confirmed_reset_count} 次重置`);
       setText("signal-count", `${data.history.signal_count} 条历史信号`);
-      setText("confidence-explanation", conclusion.confidence_explanation);
       renderWindows(data.forecast.most_likely_windows);
       renderFactors(data.explanation.factors);
       renderTiboPosts(data.current.recent_tibo_posts || []);
@@ -548,32 +558,18 @@
     }
 
     async function boot() {
-      if (location.protocol === "file:") {
-        try { render(readEmbeddedData()); }
-        catch (error) {
-          $("loading").hidden = true;
-          $("status-dot").className = "status-dot error";
-          setText("status-text", "数据加载失败");
-          showNotice(`无法读取 HTML 内置预测快照：${error.message}`, true);
-        }
-        return;
-      }
       try {
-        const response = await fetch(DATA_PATH, { cache: "no-store" });
+        const pageDirectoryUrl = new URL("./", location.href);
+        const dataUrl = new URL(DATA_FILE, pageDirectoryUrl);
+        dataUrl.searchParams.set("_t", String(Date.now()));
+        const response = await fetch(dataUrl, { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        if (!data || !data.conclusion || !data.forecast || !data.model) throw new Error("JSON 结构不完整");
-        render(data);
+        render(validateData(await response.json()));
       } catch (error) {
-        try {
-          render(readEmbeddedData());
-          showNotice(`相对 JSON 加载失败（${error.message}），当前展示 HTML 内置的同批次预测快照。`);
-        } catch (fallbackError) {
-          $("loading").hidden = true;
-          $("status-dot").className = "status-dot error";
-          setText("status-text", "数据加载失败");
-          showNotice(`无法加载 ${DATA_PATH}，HTML 内置快照也不可用：${fallbackError.message}`, true);
-        }
+        $("loading").hidden = true;
+        $("status-dot").className = "status-dot error";
+        setText("status-text", "数据加载失败");
+        showNotice(`无法加载同目录 ${DATA_FILE}：${error.message}`, true);
       }
     }
     boot();
