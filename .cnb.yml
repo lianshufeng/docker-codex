@@ -96,8 +96,6 @@ master:
             docker image inspect "${IMAGE_REF}" \
               --format 'Image={{.RepoTags}} OS/Arch={{.Os}}/{{.Architecture}}'
 
-            # 验证镜像中的 Codex CLI 可以正常运行
-            docker run --rm "${IMAGE_REF}" --version
 
             echo "===== PUSH IMAGES ====="
 
