@@ -56,12 +56,10 @@ master:
 
             IMAGE_LATEST="${REGISTRY_IMAGE}:latest"
             IMAGE_AMD64="${REGISTRY_IMAGE}:amd64"
-            IMAGE_REF="${REGISTRY_IMAGE}:${REF}"
 
             echo "===== IMAGE TAGS ====="
             echo "IMAGE_LATEST=${IMAGE_LATEST}"
             echo "IMAGE_AMD64=${IMAGE_AMD64}"
-            echo "IMAGE_REF=${IMAGE_REF}"
             echo "======================"
 
             echo "===== DOCKER INFO ====="
@@ -90,11 +88,6 @@ master:
               --tag "${IMAGE_AMD64}" \
               --file Dockerfile \
               .
-
-            echo "===== VERIFY IMAGE ====="
-
-            docker image inspect "${IMAGE_REF}" \
-              --format 'Image={{.RepoTags}} OS/Arch={{.Os}}/{{.Architecture}}'
 
 
             echo "===== PUSH IMAGES ====="
