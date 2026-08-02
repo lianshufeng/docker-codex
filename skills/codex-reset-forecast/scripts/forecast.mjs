@@ -33,7 +33,7 @@ const FEATURE_KEYS = [
 ];
 
 function parseArgs(argv) {
-  const args = { input: null, inputBase64: null, probeBase64: null, existing: null, backtest: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, postUrl: null, selfTest: false };
+  const args = { input: null, inputBase64: null, probeBase64: null, existing: null, backtest: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, postUrl: null, postToken: null, selfTest: false };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--input") args.input = argv[++i];
     else if (argv[i] === "--input-base64") args.inputBase64 = argv[++i];
@@ -43,6 +43,7 @@ function parseArgs(argv) {
     else if (argv[i] === "--output") args.output = path.resolve(argv[++i]);
     else if (argv[i] === "--render-existing") args.renderExisting = path.resolve(argv[++i]);
     else if (argv[i] === "--post-url") args.postUrl = argv[++i];
+    else if (argv[i] === "--post-token") args.postToken = argv[++i];
     else if (argv[i] === "--self-test") args.selfTest = true;
     else throw new Error(`未知参数：${argv[i]}`);
   }
@@ -1123,7 +1124,7 @@ function writeAtomic(output, outputPath) {
   fs.renameSync(temporary, outputPath);
 }
 
-async function postGeneratedJson(outputPath, postUrl) {
+async function postGeneratedJson(outputPath, postUrl, postToken = null) {
   const target = new URL(postUrl);
   if (target.protocol !== "http:" && target.protocol !== "https:") throw new Error("--post-url 只支持 HTTP 或 HTTPS URL");
   const body = fs.readFileSync(outputPath, "utf8");
@@ -1134,7 +1135,7 @@ async function postGeneratedJson(outputPath, postUrl) {
   try {
     response = await fetch(target, {
       method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8", Accept: "application/json" },
+      headers: { "Content-Type": "application/json; charset=utf-8", Accept: "application/json", ...(postToken ? { token: postToken } : {}) },
       body,
       redirect: "error",
       signal: controller.signal,
@@ -1143,7 +1144,7 @@ async function postGeneratedJson(outputPath, postUrl) {
     clearTimeout(timeout);
   }
   if (!response.ok) throw new Error(`JSON POST 提交失败：HTTP ${response.status}`);
-  return { url: target.href, status: response.status, content_type: response.headers.get("content-type") };
+  return { url: target.href, status: response.status, content_type: response.headers.get("content-type"), response_body: await response.text() };
 }
 
 function migrateDisplayContract(output) {
@@ -1374,7 +1375,7 @@ async function main() {
     validateOutput(output);
     writeAtomic(output, args.renderExisting);
     const htmlOutput = writeHtmlAtomic(output, args.renderExisting);
-    const postResult = args.postUrl ? await postGeneratedJson(args.renderExisting, args.postUrl) : null;
+    const postResult = args.postUrl ? await postGeneratedJson(args.renderExisting, args.postUrl, args.postToken) : null;
     process.stdout.write(`${JSON.stringify({ status: output.status, output: args.renderExisting, html_output: htmlOutput, render_only: true, display_contract_migrated: true, post_result: postResult })}\n`);
     return;
   }
@@ -1391,7 +1392,7 @@ async function main() {
   const output = runForecast(rawInput);
   writeAtomic(output, args.output);
   const htmlOutput = writeHtmlAtomic(output, args.output);
-  const postResult = args.postUrl ? await postGeneratedJson(args.output, args.postUrl) : null;
+  const postResult = args.postUrl ? await postGeneratedJson(args.output, args.postUrl, args.postToken) : null;
   process.stdout.write(`${JSON.stringify({ status: output.status, output: args.output, html_output: htmlOutput, blocked_reasons: output.blocked_reasons, post_result: postResult })}\n`);
 }
 
