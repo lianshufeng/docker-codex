@@ -20,11 +20,11 @@
 
 `--probe-base64` 仅为旧调用兼容入口，固定返回 `full_refresh`，不得据此跳过后续完整流程。
 
-`current` 必须包含 `as_of_utc`、`cross_source_consistent`、`tibo_work_timezone`、`latest_overall_post`、`latest_reset_signal` 和 `recent_tibo_posts`。`tibo_work_timezone` 使用带夏令时规则的 IANA 时区，默认 `America/Los_Angeles`；不得使用固定 UTC 偏移代替。帖子对象必须包含 `post_id`、`published_at_utc`、`url`、`text`、`signal_level`、`classification_evidence`。
+`current` 必须包含 `as_of_utc`、`cross_source_consistent`、`tibo_work_timezone`、`latest_overall_post`、`latest_reset_signal` 和 `recent_tibo_posts`。`cross_source_consistent = false` 表示来源内容冲突并触发降级预测，不单独阻断流程。`tibo_work_timezone` 使用带夏令时规则的 IANA 时区，默认 `America/Los_Angeles`；不得使用固定 UTC 偏移代替。帖子对象必须包含 `post_id`、`published_at_utc`、`url`、`text`、`signal_level`、`classification_evidence`。来源冲突时，`latest_overall_post` 使用带精确 ID、发布时间和 URL 的最新可审计候选；缺少这些字段的更晚搜索摘要只进入 `reasoning_context`。`latest_reset_signal` 只有在精确 ID、发布时间、原文和分类齐全时才能进入 `historical_signals` 作为当前信号，否则模型必须使用 `baseline_fallback`。
 
 `recent_tibo_posts[]` 固定保存按发布时间倒序排列的最新 3—6 条总体动态，每条必须包含 `post_id`、`published_at_utc`、`url`、`text_original`、`text_zh`、`translation_method`、`post_type`、`signal_level`、`classification_evidence`、`is_latest_overall`、`is_latest_reset_signal`。展示等级允许 `0—4`；等级 `4` 表示已完成，禁止降级为 `3`。`translation_method` 固定为 `chatgpt`；`post_type` 只使用 `reset_signal`、`codex`、`limits`、`release`、`other`。第一条必须与 `latest_overall_post` 一致并令 `is_latest_overall = true`。
 
-`sources[]` 必须包含 `source_id`、`name`、`url`、`retrieved_at_utc`、`retrieval_method`、`status`、`fresh`、`evidence_ref`。`retrieval_method` 只能是 `chatgpt_remote_web_search` 或 `remote_connector`。
+`sources[]` 必须包含 `source_id`、`name`、`url`、`retrieved_at_utc`、`retrieval_method`、`status`、`fresh`、`evidence_ref`。`retrieval_method` 只能是 `chatgpt_remote_web_search` 或 `remote_connector`。`status` 可使用 `ok`、`conflict` 或 `failed`；`conflict` 表示抓取成功但内容与另一来源不一致，仍计入新鲜远程来源数量，只有 `failed` 不计入。
 
 `reasoning_context.horizons[]` 必须完整覆盖 `2、4、8、12、24、72` 小时，每项固定包含 `horizon_hours:number`、`llm_evidence_summary:string`、`supporting_factors:string[]`、`counter_factors:string[]`、`uncertainty:string`、`evidence_refs:string[]`。这些字段由 ChatGPT 基于本次已抓取证据生成，只负责解释，不得包含可覆盖模型概率、系数、模型状态或门禁的字段。
 

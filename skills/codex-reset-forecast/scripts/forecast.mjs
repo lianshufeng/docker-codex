@@ -762,7 +762,7 @@ function blockedConclusion(reasons) {
   };
 }
 
-function buildConclusion(status, horizons, windows, factors, historyCount, hasActiveSignal = true) {
+function buildConclusion(status, horizons, windows, factors, historyCount, hasActiveSignal = true, sourceConsistent = true) {
   const primary = horizons.find((item) => item.cumulative_probability >= 0.5) ?? horizons.at(-1);
   const topWindow = windows[0] ?? null;
   const probability = primary.cumulative_probability;
@@ -783,7 +783,9 @@ function buildConclusion(status, horizons, windows, factors, historyCount, hasAc
     most_likely_window_end_beijing: topWindow?.end_at_beijing ?? null,
     most_likely_window_probability: topWindow?.window_probability ?? null,
     confidence_level: confidenceLevel,
-    confidence_explanation: status === "ok"
+    confidence_explanation: !sourceConsistent
+      ? "最新总体动态未通过独立第二来源一致性核验；模型已继续计算，但结果按低置信度展示，无法精确定位的新摘要未作为当前信号。"
+      : status === "ok"
       ? `Tibo 信号延迟模型已通过信号起点滚动回测，并基于 ${historyCount} 次确认重置及意图—结果配对生成结论。`
       : hasActiveSignal
         ? `当前信号延迟模型尚未通过信号起点滚动回测，结果按低置信度展示。`
@@ -884,9 +886,8 @@ function buildBlockedOutput(input, reasons) {
 function validateRemoteGate(data) {
   const reasons = [];
   const allowedMethods = new Set(["chatgpt_remote_web_search", "remote_connector"]);
-  const validSources = data.sources.filter((source) => source.status === "ok" && source.fresh && allowedMethods.has(source.retrieval_method));
-  if (validSources.length < 2) reasons.push("至少需要两个新鲜且由 ChatGPT/Codex 远程能力抓取的来源");
-  if (!data.current.cross_source_consistent) reasons.push("Tibo 最新总体动态未通过独立第二来源核验");
+  const validSources = data.sources.filter((source) => source.status !== "failed" && source.fresh && allowedMethods.has(source.retrieval_method));
+  if (validSources.length < 2) reasons.push("至少需要两个新鲜且由 ChatGPT/Codex 远程能力抓取的来源；来源可以存在已披露的内容冲突");
   if (!data.current.latest_overall_post) reasons.push("缺少 Tibo 最新总体动态");
   if (data.current.recent_tibo_posts.length < 3) reasons.push("至少需要 3 条近期 Tibo 总体动态用于页面展示");
   if (data.current.recent_tibo_posts.some((post) => !post.text_original.trim() || !post.text_zh.trim() || post.translation_method !== "chatgpt")) reasons.push("近期 Tibo 动态缺少英文原文、中文翻译或 ChatGPT 翻译标记");
@@ -957,13 +958,21 @@ function runForecast(rawInput) {
   const currentFeatures = featureVector(asOfMs + 3600_000, lastResetMs, data, best.decayHours, best.cooldownHours);
   const validation = signalValidation;
   const positives = rows.reduce((sum, row) => sum + row.y, 0);
-  const status = validation.passed && currentSignal ? "ok" : "degraded";
-  const modelStatus = validation.passed && currentSignal ? "trained" : "degraded";
+  const status = data.current.cross_source_consistent && validation.passed && currentSignal ? "ok" : "degraded";
+  const modelStatus = data.current.cross_source_consistent && validation.passed && currentSignal ? "trained" : "degraded";
   const adjustedHourly = currentSignal
     ? adjustedHourlyForecast(forecast.hourly, adjustedPoints, data, currentSignal, asOfMs)
     : worktimeHourlyForecast(forecast.hourly, adjustedPoints, data);
   const windows = likelyWindows(adjustedHourly);
   const factors = explanationFactors(model, currentFeatures, data);
+  if (!data.current.cross_source_consistent) factors.push({
+    feature_key: "source_consistency",
+    feature_value: 0,
+    direction: "decrease",
+    contribution_log_odds: 0,
+    evidence_refs: data.sources.filter((source) => source.status !== "failed").map((source) => source.evidence_ref),
+    explanation: "最新总体动态未通过独立第二来源一致性核验；模型仍继续计算，但状态与结论置信度降级，无法精确定位的新摘要不作为当前 Tibo 信号。",
+  });
   const representativeSignalDelta = horizons.find((item) => item.horizon_hours === 24)?.signal_probability_delta ?? horizons.at(-1).signal_probability_delta;
   if (currentSignal) factors.push({
       feature_key: "tibo_signal_latency_posterior",
@@ -1056,11 +1065,14 @@ function runForecast(rawInput) {
       horizons,
       most_likely_windows: windows,
     },
-    conclusion: buildConclusion(status, horizons, windows, factors, events.length, Boolean(currentSignal)),
+    conclusion: buildConclusion(status, horizons, windows, factors, events.length, Boolean(currentSignal), data.current.cross_source_consistent),
     explanation: {
       summary: "以 Tibo 信号等级和历史信号—重置延迟为主模型；等级 4 只表示已完成，重置后冷却与历史间隔形成弱基线，再按当地工作时段分配具体小时概率；LLM 只解释证据。",
       factors,
-      limitations: ["Tibo 意图—结果配对样本仍少，部分落地时间为区间删失；工作时段使用配置时区与历史小时分布，不以国籍直接推定。"],
+      limitations: [
+        "Tibo 意图—结果配对样本仍少，部分落地时间为区间删失；工作时段使用配置时区与历史小时分布，不以国籍直接推定。",
+        ...(!data.current.cross_source_consistent ? ["最新总体动态存在来源冲突：概率继续由确定性模型生成，但本次状态和置信度已降级；无法精确定位的新摘要未作为模型信号。"] : []),
+      ],
       risk_notice: "这是根据公开历史记录建立的统计模型，不是 OpenAI 官方时间表。",
     },
   };
@@ -1333,6 +1345,13 @@ function selfTest() {
   if (output.history.confirmed_reset_count !== 30) throw new Error("自检历史事件数量不正确");
   if (output.forecast.horizons.length !== HORIZONS.length || output.forecast.horizons.at(-1)?.horizon_hours !== 72) throw new Error("自检预测范围超过 72 小时");
   if (output.conclusion.primary_horizon_hours == null || !output.conclusion.headline.includes("重置概率")) throw new Error("自检结论结构不正确");
+  const conflictInput = syntheticInput();
+  conflictInput.current.cross_source_consistent = false;
+  conflictInput.sources[1].status = "conflict";
+  const conflictOutput = runForecast(conflictInput);
+  validateOutput(conflictOutput);
+  if (conflictOutput.status !== "degraded" || conflictOutput.forecast.horizons.length !== HORIZONS.length) throw new Error("自检来源冲突未继续生成降级预测");
+  if (!conflictOutput.explanation.factors.some((factor) => factor.feature_key === "source_consistency")) throw new Error("自检来源冲突缺少降级说明");
   const forbiddenInput = syntheticInput();
   forbiddenInput.reasoning_context.horizons[0].cumulative_probability = 1;
   const forbiddenOutput = runForecast(forbiddenInput);
