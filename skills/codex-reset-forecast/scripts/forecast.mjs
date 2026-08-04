@@ -17,8 +17,12 @@ const LAMBDAS = [0.01, 0.1, 1, 10, 100];
 const DECAYS = [12, 24, 48, 72];
 const DEFAULT_WORK_TIMEZONE = "America/Los_Angeles";
 const SIGNAL_PRIOR_STRENGTH = 1;
-const SCHEMA_VERSION = "1.8.1";
+const SCHEMA_VERSION = "1.9.0";
 const MODEL_VERSION = "3.1.0";
+const MIN_RECENT_POSTS = 10;
+const MAX_RECENT_POSTS = 30;
+const X_EPOCH_MS = 1_288_834_974_657n;
+const POST_TIME_TOLERANCE_MS = 60_000;
 const REUSE_MAX_AGE_MINUTES = 20;
 const FULL_REFRESH_MAX_AGE_HOURS = 24;
 const COOLDOWN_HOUR_CANDIDATES = [6, 12, 24];
@@ -72,6 +76,19 @@ function beijingIso(value) {
   const date = new Date(value);
   const local = new Date(date.getTime() + 8 * 3600_000).toISOString().replace("Z", "+08:00");
   return local;
+}
+
+function snowflakeTimestampMs(postId) {
+  if (!/^\d+$/.test(String(postId ?? ""))) return null;
+  const timestamp = (BigInt(postId) >> 22n) + X_EPOCH_MS;
+  return timestamp <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(timestamp) : null;
+}
+
+function compareRecentPosts(a, b) {
+  const timeDifference = new Date(b.published_at_utc) - new Date(a.published_at_utc);
+  if (timeDifference) return timeDifference;
+  if (/^\d+$/.test(a.post_id) && /^\d+$/.test(b.post_id)) return BigInt(b.post_id) > BigInt(a.post_id) ? 1 : BigInt(b.post_id) < BigInt(a.post_id) ? -1 : 0;
+  return String(b.post_id).localeCompare(String(a.post_id));
 }
 
 function localTimeParts(value, timeZone) {
@@ -190,6 +207,44 @@ function normalizeRecentPost(post) {
   };
 }
 
+function recentPostIntegrityReasons(current, requireCount = true) {
+  const reasons = [];
+  const posts = Array.isArray(current?.recent_tibo_posts) ? current.recent_tibo_posts : [];
+  if (requireCount && (posts.length < MIN_RECENT_POSTS || posts.length > MAX_RECENT_POSTS)) reasons.push(`近期 Tibo 总体动态必须保留本次抓取的 ${MIN_RECENT_POSTS}—${MAX_RECENT_POSTS} 条`);
+  const seenIds = new Set();
+  let latestOverallFlags = 0;
+  let latestResetFlags = 0;
+  posts.forEach((post, index) => {
+    const label = `近期 Tibo 动态第 ${index + 1} 条`;
+    const id = String(post?.post_id ?? "");
+    if (!/^\d+$/.test(id)) reasons.push(`${label}缺少有效数字帖子 ID`);
+    else {
+      if (seenIds.has(id)) reasons.push(`${label}帖子 ID 重复`);
+      seenIds.add(id);
+      const encodedTime = snowflakeTimestampMs(id);
+      const publishedTime = new Date(post.published_at_utc).getTime();
+      if (!Number.isFinite(publishedTime) || encodedTime == null || Math.abs(publishedTime - encodedTime) > POST_TIME_TOLERANCE_MS) reasons.push(`${label}发布时间与 Snowflake ID 不一致`);
+      if (!String(post.url ?? "").includes(`/status/${id}`)) reasons.push(`${label}URL 与帖子 ID 不一致`);
+    }
+    if (!String(post.text_original ?? "").trim() || !String(post.text_zh ?? "").trim() || post.translation_method !== "chatgpt") reasons.push(`${label}缺少英文原文、中文翻译或 ChatGPT 翻译标记`);
+    if (!String(post.classification_evidence ?? "").trim()) reasons.push(`${label}缺少分类依据`);
+    if (!Number.isInteger(post.signal_level) || post.signal_level < 0 || post.signal_level > 4) reasons.push(`${label}信号等级必须为 0—4 的整数`);
+    if (post.is_latest_overall) latestOverallFlags += 1;
+    if (post.is_latest_reset_signal) latestResetFlags += 1;
+    if (index > 0 && compareRecentPosts(posts[index - 1], post) > 0) reasons.push("近期 Tibo 动态未按发布时间和帖子 ID 严格倒序排列");
+  });
+  if (posts.length && (latestOverallFlags !== 1 || !posts[0]?.is_latest_overall)) reasons.push("近期 Tibo 动态必须且只能将首条标记为最新总体动态");
+  const latestOverall = current?.latest_overall_post;
+  const first = posts[0];
+  if (!latestOverall || !first || latestOverall.post_id !== first.post_id || latestOverall.published_at_utc !== first.published_at_utc || latestOverall.url !== first.url || latestOverall.text !== first.text_original) reasons.push("近期 Tibo 动态首条与最新总体动态的 ID、时间、URL 或原文不一致");
+  const latestReset = current?.latest_reset_signal;
+  if (latestReset) {
+    const resetPost = posts.find((post) => post.is_latest_reset_signal);
+    if (latestResetFlags !== 1 || !resetPost || latestReset.post_id !== resetPost.post_id || latestReset.published_at_utc !== resetPost.published_at_utc || latestReset.url !== resetPost.url || latestReset.text !== resetPost.text_original || latestReset.signal_level !== resetPost.signal_level || latestReset.classification_evidence !== resetPost.classification_evidence) reasons.push("最新重置相关动态与近期时间线的 ID、时间、URL、原文或分类不一致");
+  } else if (latestResetFlags) reasons.push("缺少最新重置相关动态对象，但近期时间线存在对应标记");
+  return [...new Set(reasons)];
+}
+
 function normalizeHorizonReasoning(item) {
   const allowedKeys = ["horizon_hours", "llm_evidence_summary", "supporting_factors", "counter_factors", "uncertainty", "evidence_refs"];
   const extraKeys = Object.keys(item ?? {}).filter((key) => !allowedKeys.includes(key));
@@ -258,12 +313,9 @@ function normalizeInput(input) {
     occurred_at_utc: iso(context.occurred_at_utc, "context.occurred_at_utc"),
     source_url: String(context.source_url ?? ""),
   })).sort((a, b) => new Date(a.occurred_at_utc) - new Date(b.occurred_at_utc));
-  const seenRecentPosts = new Set();
   const recentPosts = (Array.isArray(input.current?.recent_tibo_posts) ? input.current.recent_tibo_posts : [])
     .map(normalizeRecentPost)
-    .sort((a, b) => new Date(b.published_at_utc) - new Date(a.published_at_utc))
-    .filter((post) => post.post_id && !seenRecentPosts.has(post.post_id) && seenRecentPosts.add(post.post_id))
-    .slice(0, 6);
+    .sort(compareRecentPosts);
   const horizonReasoning = (Array.isArray(input.reasoning_context?.horizons) ? input.reasoning_context.horizons : [])
     .map(normalizeHorizonReasoning)
     .sort((a, b) => a.horizon_hours - b.horizon_hours);
@@ -889,9 +941,7 @@ function validateRemoteGate(data) {
   const validSources = data.sources.filter((source) => source.status !== "failed" && source.fresh && allowedMethods.has(source.retrieval_method));
   if (validSources.length < 2) reasons.push("至少需要两个新鲜且由 ChatGPT/Codex 远程能力抓取的来源；来源可以存在已披露的内容冲突");
   if (!data.current.latest_overall_post) reasons.push("缺少 Tibo 最新总体动态");
-  if (data.current.recent_tibo_posts.length < 3) reasons.push("至少需要 3 条近期 Tibo 总体动态用于页面展示");
-  if (data.current.recent_tibo_posts.some((post) => !post.text_original.trim() || !post.text_zh.trim() || post.translation_method !== "chatgpt")) reasons.push("近期 Tibo 动态缺少英文原文、中文翻译或 ChatGPT 翻译标记");
-  if (data.current.recent_tibo_posts[0]?.post_id !== data.current.latest_overall_post?.post_id || !data.current.recent_tibo_posts[0]?.is_latest_overall) reasons.push("近期 Tibo 动态首条与最新总体动态不一致");
+  reasons.push(...recentPostIntegrityReasons(data.current));
   if (JSON.stringify(data.horizonReasoning.map((item) => item.horizon_hours)) !== JSON.stringify(HORIZONS)) reasons.push("LLM 逐预测范围证据解读必须完整覆盖固定预测节点");
   if (data.horizonReasoning.some((item) => !item.llm_evidence_summary.trim() || !item.uncertainty.trim() || !item.supporting_factors.length || !item.counter_factors.length || !item.evidence_refs.length)) reasons.push("LLM 逐预测范围证据解读缺少摘要、支持因素、反向因素、不确定性或证据引用");
   const knownEvidenceRefs = new Set(data.sources.map((source) => source.evidence_ref));
@@ -1095,7 +1145,7 @@ function validateOutput(output) {
   }
   if (output.status !== "blocked" && (output.model.name !== "tibo_signal_worktime_survival" || !new Set(["signal_primary", "baseline_fallback"]).has(output.model.variant) || output.model.signal_adjustment?.method !== "signal_latency_empirical_bayes_with_worktime")) throw new Error("信号主模型输出契约不一致");
   if (!Array.isArray(output.current.recent_tibo_posts)) throw new Error("近期 Tibo 动态结构无效");
-  if (output.status !== "blocked" && (output.current.recent_tibo_posts.length < 3 || output.current.recent_tibo_posts.length > 6)) throw new Error("近期 Tibo 动态数量必须为 3—6 条");
+  if (output.status !== "blocked" && (output.current.recent_tibo_posts.length < MIN_RECENT_POSTS || output.current.recent_tibo_posts.length > MAX_RECENT_POSTS)) throw new Error(`近期 Tibo 动态数量必须为 ${MIN_RECENT_POSTS}—${MAX_RECENT_POSTS} 条`);
   const recentPostKeys = ["post_id", "published_at_utc", "url", "text_original", "text_zh", "translation_method", "post_type", "signal_level", "classification_evidence", "is_latest_overall", "is_latest_reset_signal"];
   for (const post of output.current.recent_tibo_posts) {
     if (JSON.stringify(Object.keys(post)) !== JSON.stringify(recentPostKeys)) throw new Error("近期 Tibo 动态固定 key 不一致");
@@ -1105,6 +1155,10 @@ function validateOutput(output) {
   }
   const latestResetPost = output.current.recent_tibo_posts.find((post) => post.is_latest_reset_signal);
   if (latestResetPost && output.current.latest_reset_signal && latestResetPost.post_id === output.current.latest_reset_signal.post_id && latestResetPost.signal_level !== output.current.latest_reset_signal.signal_level) throw new Error("最新重置相关动态等级在当前对象和近期列表中不一致");
+  if (output.status !== "blocked") {
+    const integrityReasons = recentPostIntegrityReasons(output.current);
+    if (integrityReasons.length) throw new Error(integrityReasons.join("；"));
+  }
   if (!Array.isArray(output.forecast.horizons) || !Array.isArray(output.explanation.factors)) throw new Error("forecast 或 explanation 结构无效");
   if (!Array.isArray(output.conclusion.reason_keys) || !new Set(["low", "medium", "high", "unavailable"]).has(output.conclusion.confidence_level)) throw new Error("conclusion 结构无效");
   if (output.forecast.horizons.some((row) => row.horizon_hours > 72)) throw new Error("预测范围不得超过 72 小时");
@@ -1221,10 +1275,57 @@ function probeFailure(reason) {
 }
 
 function runRefreshProbe(rawProbe, existingPath, outputPath) {
-  void rawProbe;
-  void existingPath;
   void outputPath;
-  return probeFailure("指纹短路已停用；每次执行都必须继续完整刷新流程");
+  if (!existingPath || !fs.existsSync(existingPath)) return probeFailure("现有预测 JSON 不存在");
+
+  let existing;
+  try {
+    existing = JSON.parse(fs.readFileSync(existingPath, "utf8"));
+  } catch {
+    return probeFailure("现有预测 JSON 无法解析");
+  }
+  const existingPost = existing?.current?.latest_overall_post;
+  if (existing?.schema_version !== SCHEMA_VERSION || existing?.model?.version !== MODEL_VERSION) return probeFailure("现有预测版本不兼容");
+  const existingTimelineReasons = recentPostIntegrityReasons(existing?.current);
+  if (existingTimelineReasons.length) return probeFailure(`现有预测近期时间线校验失败：${existingTimelineReasons.join("；")}`);
+  if (!existingPost?.post_id || !/^\d+$/.test(String(existingPost.post_id)) || !existingPost?.published_at_utc) return probeFailure("现有预测缺少可比较的最新帖子");
+
+  let probe;
+  try {
+    probe = normalizeProbe(rawProbe);
+  } catch (error) {
+    return { action: "retry_probe", reason: error.message, wrote_files: false };
+  }
+  const validSources = probe.sources.filter((source) => source.status === "ok" && source.fresh && new Set(["chatgpt_remote_web_search", "remote_connector"]).has(source.retrieval_method));
+  if (!validSources.length) return { action: "retry_probe", reason: "快速检查缺少新鲜远程来源", wrote_files: false };
+  if (validSources.some((source) => {
+    const ageMinutes = (new Date(probe.checkedAt) - new Date(source.retrieved_at_utc)) / 60_000;
+    return ageMinutes < -5 || ageMinutes > 20;
+  })) return { action: "retry_probe", reason: "快速检查来源不在 20 分钟新鲜度窗口内", wrote_files: false };
+
+  const remotePost = probe.latestOverallPost;
+  if (!remotePost?.post_id || !/^\d+$/.test(String(remotePost.post_id)) || !remotePost?.published_at_utc || !remotePost?.url) return { action: "retry_probe", reason: "远程来源没有返回精确帖子 ID、时间和 URL", wrote_files: false };
+  const existingId = String(existingPost.post_id);
+  const remoteId = String(remotePost.post_id);
+  const existingAt = iso(existingPost.published_at_utc, "existing.latest_overall_post.published_at_utc");
+  const remoteAt = iso(remotePost.published_at_utc, "probe.latest_overall_post.published_at_utc");
+  const remoteSnowflakeTime = snowflakeTimestampMs(remoteId);
+  if (remoteSnowflakeTime == null || Math.abs(new Date(remoteAt).getTime() - remoteSnowflakeTime) > POST_TIME_TOLERANCE_MS || !String(remotePost.url).includes(`/status/${remoteId}`)) return { action: "retry_probe", reason: "远程最新帖子 ID、发布时间或 URL 绑定不一致", wrote_files: false };
+  if (remoteId === existingId) {
+    return {
+      action: "reuse_existing",
+      reason: "same_latest_post",
+      existing_post_id: existingId,
+      remote_post_id: remoteId,
+      generated_at_beijing: existing.generated_at_beijing ?? null,
+      output: path.resolve(existingPath),
+      wrote_files: false,
+    };
+  }
+  if (BigInt(remoteId) > BigInt(existingId)) {
+    return { action: "full_refresh", reason: "new_latest_post", existing_post_id: existingId, remote_post_id: remoteId, wrote_files: false };
+  }
+  return { action: "retry_probe", reason: "远程帖子 ID 或发布时间发生倒退", existing_post_id: existingId, remote_post_id: remoteId, wrote_files: false };
 }
 
 function runBacktest(rawInput) {
@@ -1297,25 +1398,30 @@ function syntheticInput() {
     });
   }
   const asOf = new Date(new Date(events.at(-1).announced_at_utc).getTime() + 24 * 3600_000).toISOString();
+  const recentPosts = Array.from({ length: 12 }, (_, index) => {
+    const publishedAtMs = new Date(asOf).getTime() - index * 3600_000;
+    const postId = (((BigInt(publishedAtMs) - X_EPOCH_MS) << 22n) + BigInt(index)).toString();
+    return {
+      post_id: postId,
+      published_at_utc: new Date(publishedAtMs).toISOString(),
+      url: `https://x.com/thsottiaux/status/${postId}`,
+      text_original: `Recent post ${index}`,
+      text_zh: `近期动态 ${index}`,
+      translation_method: "chatgpt",
+      post_type: index === 1 ? "reset_signal" : "other",
+      signal_level: index === 1 ? 2 : 0,
+      classification_evidence: index === 1 ? "mentions reset" : "no reset signal",
+      is_latest_overall: index === 0,
+      is_latest_reset_signal: index === 1,
+    };
+  });
   return {
     current: {
       as_of_utc: asOf,
       cross_source_consistent: true,
-      latest_overall_post: { post_id: "latest", published_at_utc: asOf, url: "https://example.com/latest", text: "hello", signal_level: 0, classification_evidence: "none" },
-      latest_reset_signal: signals.at(-1),
-      recent_tibo_posts: Array.from({ length: 6 }, (_, index) => ({
-        post_id: index === 0 ? "latest" : `recent-${index}`,
-        published_at_utc: new Date(new Date(asOf).getTime() - index * 3600_000).toISOString(),
-        url: `https://example.com/recent-${index}`,
-        text_original: `Recent post ${index}`,
-        text_zh: `近期动态 ${index}`,
-        translation_method: "chatgpt",
-        post_type: index === 1 ? "reset_signal" : "other",
-        signal_level: index === 1 ? 2 : 0,
-        classification_evidence: index === 1 ? "mentions reset" : "none",
-        is_latest_overall: index === 0,
-        is_latest_reset_signal: index === 1,
-      })),
+      latest_overall_post: { post_id: recentPosts[0].post_id, published_at_utc: recentPosts[0].published_at_utc, url: recentPosts[0].url, text: recentPosts[0].text_original, signal_level: recentPosts[0].signal_level, classification_evidence: recentPosts[0].classification_evidence },
+      latest_reset_signal: { post_id: recentPosts[1].post_id, published_at_utc: recentPosts[1].published_at_utc, url: recentPosts[1].url, text: recentPosts[1].text_original, signal_level: recentPosts[1].signal_level, classification_evidence: recentPosts[1].classification_evidence },
+      recent_tibo_posts: recentPosts,
     },
     sources: ["one", "two"].map((id) => ({ source_id: id, name: id, url: `https://example.com/${id}`, retrieved_at_utc: asOf, retrieval_method: "chatgpt_remote_web_search", status: "ok", fresh: true, evidence_ref: `source:${id}` })),
     reasoning_context: {
@@ -1342,6 +1448,15 @@ function selfTest() {
   const output = runForecast(syntheticInput());
   validateOutput(output);
   if (output.status === "blocked") throw new Error(`自检被意外阻断：${output.blocked_reasons.join("；")}`);
+  if (output.current.recent_tibo_posts.length !== 12 || output.current.recent_tibo_posts.some((post, index, posts) => index > 0 && compareRecentPosts(posts[index - 1], post) > 0)) throw new Error("自检近期动态未完整保留或未按最新优先排序");
+  const mismatchedTimelineInput = syntheticInput();
+  mismatchedTimelineInput.current.recent_tibo_posts[2].published_at_utc = mismatchedTimelineInput.current.recent_tibo_posts[3].published_at_utc;
+  const mismatchedTimelineOutput = runForecast(mismatchedTimelineInput);
+  if (mismatchedTimelineOutput.status !== "blocked" || !mismatchedTimelineOutput.blocked_reasons.some((reason) => reason.includes("Snowflake ID"))) throw new Error("自检未阻止帖子 ID 与发布时间错配");
+  const mismatchedTextInput = syntheticInput();
+  mismatchedTextInput.current.latest_overall_post.text = "wrong post text";
+  const mismatchedTextOutput = runForecast(mismatchedTextInput);
+  if (mismatchedTextOutput.status !== "blocked" || !mismatchedTextOutput.blocked_reasons.some((reason) => reason.includes("原文不一致"))) throw new Error("自检未阻止最新帖子正文错配");
   if (output.history.confirmed_reset_count !== 30) throw new Error("自检历史事件数量不正确");
   if (output.forecast.horizons.length !== HORIZONS.length || output.forecast.horizons.at(-1)?.horizon_hours !== 72) throw new Error("自检预测范围超过 72 小时");
   if (output.conclusion.primary_horizon_hours == null || !output.conclusion.headline.includes("重置概率")) throw new Error("自检结论结构不正确");
@@ -1365,7 +1480,7 @@ function selfTest() {
   if (!fs.existsSync(htmlTarget)) throw new Error("自检未生成固定 HTML 文件");
   if (!fs.existsSync(path.join(temporaryDirectory, LOCAL_SERVER_NAME)) || !fs.existsSync(path.join(temporaryDirectory, LOCAL_LAUNCHER_NAME))) throw new Error("自检未生成本地启动文件");
   const html = fs.readFileSync(htmlTarget, "utf8");
-  if (html.includes("embedded-forecast-data") || html.includes('type="application/json"') || html.includes('type="file"') || html.includes('location.protocol') || !html.includes('new URL("./", location.href)') || !html.includes('new URL(DATA_FILE, pageDirectoryUrl)') || !html.includes('searchParams.set("_t"')) throw new Error("自检 HTML 纯网络同目录加载契约失败");
+  if (html.includes("embedded-forecast-data") || html.includes('type="application/json"') || html.includes('type="file"') || html.includes('location.protocol') || !html.includes('new URL("./", location.href)') || !html.includes('new URL(DATA_FILE, pageDirectoryUrl)') || !html.includes('searchParams.set("_t"') || !html.includes("[...posts].sort")) throw new Error("自检 HTML 纯网络同目录加载及最新优先排序契约失败");
   const lastReset = output.history.events.filter((event) => event.event_type === "confirmed_reset" && event.included_in_training).at(-1);
   const probeResult = runRefreshProbe({
     checked_at_utc: output.generated_at_utc,
@@ -1376,7 +1491,26 @@ function selfTest() {
     status_indicator: output.refresh.status_indicator,
     active_incident_id: output.refresh.active_incident_id,
   }, target, target);
-  if (probeResult.action !== "full_refresh" || probeResult.wrote_files || !probeResult.reason.includes("指纹短路已停用")) throw new Error("自检未强制进入完整刷新路径");
+  if (probeResult.action !== "reuse_existing" || probeResult.wrote_files || probeResult.reason !== "same_latest_post") throw new Error("自检同 ID 快速复用失败");
+  const corruptedExistingTarget = path.join(temporaryDirectory, "corrupted-existing.json");
+  const corruptedExisting = JSON.parse(JSON.stringify(output));
+  corruptedExisting.current.recent_tibo_posts[2].published_at_utc = corruptedExisting.current.recent_tibo_posts[3].published_at_utc;
+  fs.writeFileSync(corruptedExistingTarget, JSON.stringify(corruptedExisting), "utf8");
+  const corruptedProbeResult = runRefreshProbe({
+    checked_at_utc: output.generated_at_utc,
+    sources: [{ source_id: "probe", name: "probe", url: "https://example.com/probe", retrieved_at_utc: output.generated_at_utc, retrieval_method: "chatgpt_remote_web_search", status: "ok", fresh: true, evidence_ref: "source:probe" }],
+    latest_overall_post: output.current.latest_overall_post,
+  }, corruptedExistingTarget, target);
+  if (corruptedProbeResult.action !== "full_refresh" || !corruptedProbeResult.reason.includes("近期时间线校验失败")) throw new Error("自检未阻止复用损坏的近期时间线");
+  const newerPostId = `${BigInt(output.current.latest_overall_post.post_id) + 1n}`;
+  const newerProbe = {
+    ...JSON.parse(JSON.stringify({
+      checked_at_utc: output.generated_at_utc,
+      sources: [{ source_id: "probe", name: "probe", url: "https://example.com/probe", retrieved_at_utc: output.generated_at_utc, retrieval_method: "chatgpt_remote_web_search", status: "ok", fresh: true, evidence_ref: "source:probe" }],
+      latest_overall_post: { ...output.current.latest_overall_post, post_id: newerPostId, url: `https://x.com/thsottiaux/status/${newerPostId}` },
+    })),
+  };
+  if (runRefreshProbe(newerProbe, target, target).action !== "full_refresh") throw new Error("自检新 ID 未进入完整刷新路径");
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   process.stdout.write("forecast self-test passed\n");
 }

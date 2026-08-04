@@ -1,23 +1,27 @@
 ---
 name: codex-reset-forecast
-description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置信号、重置概率或希望预测 Codex reset 时使用。必须通过 ChatGPT/Codex 远程实时 Web Search 或远程连接器重新抓取 Tibo 动态、意图—真实重置配对、历史重置和 OpenAI 状态，禁止本地直连；再调用确定性脚本执行以 Tibo 信号延迟为主、当地工作时段为时间分配、历史重置间隔为弱先验的生存预测与信号起点滚动回测。第二来源冲突时继续生成明确标记的降级预测，禁止 AI 自行估计或修改概率。以北京时间输出固定 JSON 和动态加载该 JSON 的静态页面；当用户明确给出接收 URL 并要求提交结果时，在 JSON 成功生成后以 application/json POST 到该 URL。
+description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置信号、重置概率或希望预测 Codex reset 时使用。默认先读取现有预测 JSON，再通过一次远程实时抓取比较 Tibo 最新总体帖子 ID；ID 相同则立即复用现有结果，只有缺少有效 JSON、发现新 ID 或用户明确强制刷新时才执行完整历史抓取、双来源核验、翻译、模型与回测。禁止本地直连和 AI 自行修改概率。
 ---
 
-> 技能版本：3.6.0（来源冲突时继续降级预测）
+> 技能版本：3.8.0（近期时间线完整性校验）
 
 # Codex 额度重置时间预测技能
 
 
-## 零、强制实时抓取门禁（最高优先级）
+## 零、智能刷新门禁（最高优先级）
 
-本节优先级高于本技能其他所有规则。**每次调用都必须执行完整抓取、双来源校验、翻译、证据解读、模型计算、回测和产物校验；禁止因 Tibo 数据指纹未变化而提前返回或跳过任一步骤。**
+本节优先级高于本技能其他所有规则。默认先执行最低成本的最新帖子 ID 预检；只有预检决定 `full_refresh` 时，才读取并执行后续完整抓取、翻译、模型和页面规则。用户明确要求“强制刷新”或“完整重算”时跳过预检。
 
-### 0.A 禁止指纹短路
+### 0.A 最新帖子 ID 快速门禁
 
-1. 不得调用 `--probe-base64` 决定是否继续，也不得返回 `reuse_existing` 或 `recalculate_only`。
-2. 即使 Tibo 最新总体动态、最新重置相关动态、最近确认重置和 OpenAI 状态均未变化，也必须继续完成后续完整流程。
-3. 现有 `codex-reset-forecast.json` 只能用于防倒退检查和失败时保留有效产物，不得用于跳过抓取、翻译、证据解读、模型计算或回测。
-4. `fetched_at` 只用于本次来源新鲜度校验；数据指纹仅作为产物审计字段，不得作为流程分支条件。
+1. 先检查项目根目录或 Docker `/workspace` 下的 `codex-reset-forecast.json`。文件不存在、无法解析、schema/model 版本不兼容或缺少 `current.latest_overall_post.post_id` 时，直接进入完整刷新，不执行远程预检。
+2. 有有效 JSON 时，只读取现有帖子 ID、发布时间、schema/model 版本和结果生成时间；不得把完整 JSON 注入模型上下文。
+3. 使用一个远程实时来源只抓取 Tibo 最新总体动态的精确 `post_id`、`published_at_utc` 和 `url`，不抓历史、不翻译、不生成证据解读。
+4. 将轻量结果编码为 UTF-8 Base64，调用 `node scripts/forecast.mjs --probe-base64 <base64> --existing <现有JSON>`，由脚本比较 ID，禁止 AI 自行比较或把雪花 ID 转为 JavaScript `Number`。
+5. 脚本返回 `reuse_existing` 时立即结束：不得读取 `references/data-contract.md`、`references/model.md`，不得执行第二来源、历史抓取、翻译、模型、回测或覆盖任何产物。
+6. 脚本返回 `full_refresh` 时继续完整流程；预检抓到的新帖子可直接复用为完整流程第一来源。
+7. 脚本返回 `retry_probe` 时只增加一个独立备用远程来源；再次失败或倒退时保留现有结果并停止，不自动启动昂贵的完整流程。
+8. 快速复用只输出帖子 ID、确认未变化、现有结果生成时间和 JSON 绝对路径，不重复输出旧概率表。
 
 ### 0.0 强制使用 ChatGPT/Codex 远程代理抓取
 
@@ -27,13 +31,13 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 4. 抓取前必须确认远程工具处于实时模式；缓存搜索、模型记忆和历史结果不能满足实时抓取要求。
 5. 若当前模型提供方不支持远程实时 Web Search，远程工具不可用，或无法确认请求由远程服务执行，不得降级成本地直连；若存在有效缓存则保留并说明无法刷新，否则必须说明“当前无法通过 ChatGPT/Codex 远程能力完成实时抓取”，并停止预测。
 
-### 0.1 禁止使用旧数据代替本次抓取
+### 0.1 快速路径与完整路径的数据边界
 
-1. 不得把模型记忆、上一次回答、上一次抓取结果、缓存页面或用户之前提供的截图，当作本次的“最新数据”。
-2. 每次调用都必须通过远程能力生成新的抓取时间，并在正式回答开头展示。
-3. 上一次已知帖子 ID 和时间只能用于“防倒退检查”，不能替代当前抓取。
+1. 快速路径只允许复用已落盘预测；是否复用必须由本次远程实时抓取的最新总体帖子 ID 决定。
+2. 完整路径不得把模型记忆、上一次回答、缓存页面或用户截图当作本次最新数据。
+3. 快速路径展示本次检查时间与现有结果生成时间；完整路径按后文展示完整抓取时间。
 
-### 0.2 必须同时获取两类帖子
+### 0.2 完整刷新必须同时获取两类帖子
 
 每次执行必须分别确认以下两类帖子，二者不得混为一谈：
 
@@ -42,7 +46,7 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 
 **严禁只执行关键词搜索后，就把命中的旧帖子当成 Tibo 最新消息。**必须先做不带 reset/Codex 关键词的账号总体时间线查询，再做重置相关筛选。
 
-### 0.3 双来源核验决定置信等级，不单独阻断概率输出
+### 0.3 完整刷新双来源核验决定置信等级，不单独阻断概率输出
 
 1. 每次执行至少使用两个彼此独立的实时来源核验 `最新总体动态`。可用组合包括：
    - Tibo 的 X 原始主页或单帖页面；
@@ -66,11 +70,12 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 1. 至少一个动态来源必须提供本次抓取时间，例如 `fetched_at`、响应时间或搜索抓取时间。
 2. 动态源抓取时间距离当前北京时间原则上不得超过 **20 分钟**；超过时必须防缓存重试或更换实时来源。
 3. 帖子本身较早不等于数据源陈旧；只要抓取时间新鲜且已确认当前没有更晚帖子即可。
-4. 对获取到的 10—30 条帖子，必须按发布时间排序；若发布时间缺失，使用帖子 ID 作为辅助排序依据。
+4. 快速预检只取最新一条；进入完整刷新后，必须保留并展示本次获取到的全部 10—30 条帖子，不得只截取 3—6 条，也不得用历史重置记录补足；按发布时间严格倒序排列，发布时间相同时按帖子 ID 倒序排列。
 5. 若接口同时返回 `newest_post_at`、时间线首条记录和最新帖子 ID，必须检查三者一致。
 6. 若本次抓到的“最新帖子”比对话中已经明确出现过的帖子 ID 更小或发布时间更早，视为数据源倒退，必须重试并换源。
+7. 每条帖子的数字 ID、发布时间、正文和 URL 必须来自同一条时间线记录；脚本会按 X Snowflake ID 校验发布时间，并检查 URL 中的 `/status/<post_id>`、正文及最新标记绑定。任一项错配时不得生成新概率。
 
-### 0.5 必须检查的其他实时信息
+### 0.5 完整刷新必须检查的其他实时信息
 
 完成最新动态校验后，还必须检查：
 
@@ -81,7 +86,7 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 
 ### 0.6 失败与降级边界
 
-若本次无法联网或没有任何新鲜远程动态来源：
+快速预检首个来源失败时只重试一个独立来源；仍失败则保留现有结果并停止。完整刷新若无法联网或没有任何新鲜远程动态来源：
 
 - 不得继续给出看似实时的概率表；
 - 必须明确写出“本次无法取得新鲜远程动态，因此不生成新的重置概率”；
@@ -91,7 +96,7 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 
 完整刷新失败时不得覆盖现有有效产物；应说明失败原因并保留上次结果。
 
-### 0.7 输出前硬门禁
+### 0.7 完整刷新输出前硬门禁
 
 满足以下硬门禁即可输出新的概率表：
 
@@ -137,7 +142,7 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 
 ## 三、必须使用的数据
 
-每次调用时都必须通过 ChatGPT/Codex 远程能力重新抓取完整历史、双来源动态和 OpenAI 状态，并重新生成翻译与 LLM 证据解读。不得根据数据指纹或现有缓存缩短流程。
+只有快速门禁返回 `full_refresh` 或用户明确强制刷新时，才必须通过 ChatGPT/Codex 远程能力重新抓取完整历史、双来源动态和 OpenAI 状态，并重新生成翻译与 LLM 证据解读。
 
 优先检查：
 
@@ -173,19 +178,19 @@ Tibo 帖子的 `signal_level` 固定为：`0` 无关；`1` 只谈额度或效率
 
 ## 六、统计模型与硬门禁
 
-每次执行必须调用 `node scripts/forecast.mjs --input <远程快照.json>`，不得先调用 `--probe-base64` 尝试复用或仅重算。模型使用 [预测模型与放行规则](references/model.md) 中的“Tibo 信号延迟主模型 + 当地工作时段分配 + 历史间隔弱先验 + 重置后冷却”。在 Windows PowerShell 中，禁止把含中文的原始 JSON 直接通过管道传给 Node；必须先以 UTF-8 转为 Base64，再输入脚本。必须把 Tibo 重置意图与之后真实重置的精确时间、承诺窗口或未落地观察期配对；使用带夏令时规则的 IANA 工作时区，并从历史重置当地小时学习时段分布。脚本不得联网，AI 不得自行估计、补齐、平滑或修改概率。
+快速路径调用 `--probe-base64` 决定复用或完整刷新。只有进入完整刷新时才读取 [预测模型与放行规则](references/model.md)，并调用 `node scripts/forecast.mjs --input <远程快照.json>`。在 Windows PowerShell 中，禁止把含中文的原始 JSON 直接通过管道传给 Node；必须先以 UTF-8 转为 Base64，再输入脚本。脚本不得联网，AI 不得自行估计、补齐、平滑或修改概率。
 
 固定预测节点为 2、4、8、12、24、72 小时，禁止生成超过 72 小时的预测。少于 10 次可信重置时阻断。每次必须执行以历史 Tibo 信号为预测起点的逐步回测，最新信号只作为留出测试答案而不得进入该折训练；至少 3 折且 24 小时 Brier 不劣于相同信号起点的历史间隔基线，才允许标记回测通过。来源冲突或回测未通过时继续输出 `degraded` 预测，但不得标记为 `ok`。
 
 ## 七、每次调用的固定顺序
 
-1. 获取当前北京时间，回读现有 JSON，仅用于防倒退检查和失败保护。
-2. 不带关键词抓取 Tibo 最新 10—30 条总体动态并完成独立第二来源核验；把最新 3—6 条保存为中英双语结构。若冲突无法解决，按 0.3 选择可审计候选并标记降级，不得停止后续模型计算。
-3. 从同一批动态筛选最新重置相关帖子，检查其后是否已有确认重置；远程抓取完整历史、预告和误报，并检查 OpenAI 状态、发布与里程碑背景。
-4. 严格按 `references/data-contract.md` 生成全新的远程快照 JSON 和 2、4、8、12、24、72 小时 LLM 证据解读，再运行无网络模型脚本。
-5. 每次重新执行模型计算和滚动回测，不得复用旧概率、旧翻译或旧证据解读代替本次流程。
-6. 回读并校验 `codex-reset-forecast.json` 与 `codex.html`；对话和网页只能从 JSON 展示结论与数据，并输出绝对路径。
-7. 若用户明确要求把生成的 JSON 提交到某个 URL，调用脚本时追加 `--post-url <URL>`；只能在 JSON 原子写入并回读校验成功后提交，最后报告 HTTP 状态。用户未明确给出 URL 时禁止推测或提交。
+1. 本地确定性读取现有 JSON 的最小元数据；无有效 JSON或用户强制刷新时跳到第 4 步。
+2. 用一个新鲜远程来源轻量抓取最新总体帖子，调用 `--probe-base64`；`retry_probe` 时最多换一个来源再试。
+3. `reuse_existing` 时立即简短返回；不要读取完整流程参考文件。只有 `full_refresh` 才继续。
+4. 读取 `references/data-contract.md` 与 `references/model.md`，不带关键词抓取 Tibo 最新 10—30 条总体动态并完成独立第二来源核验；将抓到的全部帖子翻译、按最新优先排序并写入 `current.recent_tibo_posts`，不得混入历史记录或只保留其中 3—6 条，复用预检的新帖子作为第一来源。
+5. 筛选最新重置相关帖子，检查其后是否已有确认重置；远程抓取完整历史、预告、误报、OpenAI 状态、发布与里程碑背景。
+6. 生成全新远程快照 JSON 和固定节点 LLM 证据解读，运行模型和滚动回测，回读校验全部固定产物。
+7. 只有用户明确给出接收 URL 时才提交本次完整刷新生成的 JSON；快速复用路径不得重复 POST 旧结果。
 
 ## 八、固定磁盘输出契约
 
@@ -199,7 +204,7 @@ Tibo 帖子的 `signal_level` 固定为：`0` 无关；`1` 只谈额度或效率
 
 ```json
 {
-  "schema_version": "1.8.1",
+  "schema_version": "1.9.0",
   "file_name": "codex-reset-forecast.json",
   "site": {
     "file_name": "codex.html",
@@ -339,7 +344,7 @@ Tibo 帖子的 `signal_level` 固定为：`0` 无关；`1` 只谈额度或效率
 - `history.signals[]`：除原有字段外，固定包含 `intent_class:string`、`has_explicit_timing:boolean`、`promised_window_end_at_utc:string|null`、`outcome_status:string`、`outcome_time_kind:string`、`reset_at_utc:string|null`、`latency_lower_hours:number|null`、`latency_upper_hours:number|null`、`observation_end_at_utc:string`、`confidence:number`；用于审计“表达意图后是否以及何时真实重置”。
 - `history.contexts[]`：保存 `context_id`、`context_type`、`occurred_at_utc`、`source_url`，用于本次模型计算和产物审计；下次执行仍须重新抓取。
 - `history.intervals[]`：`interval_id:string`、`start_at_utc:string`、`end_at_utc:string`、`duration_hours:number`、`event_observed:boolean`、`event_id:string|null`。
-- `current.recent_tibo_posts[]`：`post_id:string`、`published_at_utc:string`、`url:string`、`text_original:string`、`text_zh:string`、`translation_method:string`、`post_type:string`、`signal_level:number`、`classification_evidence:string`、`is_latest_overall:boolean`、`is_latest_reset_signal:boolean`；展示等级允许 `0—4`，等级 `4` 必须显示为“已完成重置”。
+- `current.recent_tibo_posts[]`：固定保存并展示本次完整刷新抓到的全部 10—30 条总体动态，严格按最新优先；元素包含 `post_id:string`、`published_at_utc:string`、`url:string`、`text_original:string`、`text_zh:string`、`translation_method:string`、`post_type:string`、`signal_level:number`、`classification_evidence:string`、`is_latest_overall:boolean`、`is_latest_reset_signal:boolean`；展示等级允许 `0—4`，等级 `4` 必须显示为“已完成重置”。
 - `forecast.horizons[]`：`horizon_hours:number`、`deadline_utc:string`、`deadline_beijing:string`、`cumulative_probability:number`、`display_probability_percent:number`、`baseline_probability:number`、`signal_probability_delta:number`、`confidence_lower:number`、`confidence_upper:number`、`signal_posterior:object`、`reasoning:object`。
 - `forecast.horizons[].reasoning`：`model_basis:string`、`llm_evidence_summary:string`、`supporting_factors:string[]`、`counter_factors:string[]`、`cumulative_effect:string`、`uncertainty:string`、`evidence_refs:string[]`。`model_basis` 和 `cumulative_effect` 由脚本根据模型结果生成；其余字段来自 ChatGPT 对已抓取证据的结构化解读，不得参与或修改概率计算。
 - `forecast.most_likely_windows[]`：`start_at_beijing:string`、`end_at_beijing:string`、`window_probability:number`、`rank:number`。
@@ -387,7 +392,7 @@ Tibo 帖子的 `signal_level` 固定为：`0` 无关；`1` 只谈额度或效率
 - 不得把 Tibo 的发言称为 OpenAI 官方公告，除非有明确官方身份和出处支持。
 - 不得把累计概率误写成每个时间段的独立概率。
 - 不得只写“4 小时后”“明天”，必须给出北京时间的年月日和小时。
-- 不得在没有新数据时照抄上一次结果。
+- 快速预检确认帖子 ID 相同时只报告复用，不得重复输出旧概率表或伪装成本次重算。
 - 不得仅凭用户截图或旧的搜索结果声称“已抓取最新数据”。
 - 不得只读取“最新相关帖子”而跳过“最新总体动态”；否则无法证明时间线没有漏抓。
 - 不得在不同来源冲突时把较旧候选声称为“已确认最新”；应使用带精确 ID、时间和 URL 的最新可审计候选继续降级预测，并披露更晚但无法精确定位的摘要。
@@ -402,7 +407,9 @@ Tibo 帖子的 `signal_level` 固定为：`0` 无关；`1` 只谈额度或效率
 
 ## 十二、简洁版输出原则
 
-用户未要求详细分析时，默认输出：
+快速复用时默认只输出：最新帖子 ID 未变化、跳过的流程、现有结果生成时间和 JSON 绝对路径。
+
+完整刷新且用户未要求详细分析时，默认输出：
 
 1. 一句模型结论与模型状态
 2. 一张从 JSON 生成的概率表

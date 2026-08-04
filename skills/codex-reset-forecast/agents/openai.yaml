@@ -1,9 +1,9 @@
 interface:
   display_name: "Codex Reset Forecast"
-  short_description: "基于 Tibo 信号、工作时段和历史延迟预测 Codex 重置"
+  short_description: "先检查 Tibo 最新帖子，变化时再预测 Codex 重置"
   icon_small: "assets/icon.svg"
   icon_large: "assets/icon.svg"
-  default_prompt: "使用 $codex-reset-forecast 抓取最新 Tibo 动态并预测下一次 Codex 全局重置。"
+  default_prompt: "使用 $codex-reset-forecast 快速检查 Tibo 最新动态，仅在帖子变化时重新预测 Codex 全局重置。"
 policy:
   products:
   - chatgpt

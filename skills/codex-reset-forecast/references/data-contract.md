@@ -16,13 +16,13 @@
 }
 ```
 
-`refresh` 每次执行都包含 `mode:"full_refresh"`、`checked_at_utc`、`last_full_refresh_at_utc`、`status_indicator` 和 `active_incident_id`。现有缓存只用于防倒退检查和失败保护，不得触发快速复用或仅本地重算。
+本文件只在快速门禁决定完整刷新后读取。完整刷新输入的 `refresh` 包含 `mode:"full_refresh"`、`checked_at_utc`、`last_full_refresh_at_utc`、`status_indicator` 和 `active_incident_id`。
 
-`--probe-base64` 仅为旧调用兼容入口，固定返回 `full_refresh`，不得据此跳过后续完整流程。
+`--probe-base64` 接收本次轻量远程抓取的 `checked_at_utc`、单个或多个 `sources` 及 `latest_overall_post`，与 `--existing` 指定 JSON 的 `current.latest_overall_post` 确定性比较。返回 `reuse_existing` 时立即结束；返回 `full_refresh` 时执行本文件流程；返回 `retry_probe` 时最多更换一个独立来源。
 
 `current` 必须包含 `as_of_utc`、`cross_source_consistent`、`tibo_work_timezone`、`latest_overall_post`、`latest_reset_signal` 和 `recent_tibo_posts`。`cross_source_consistent = false` 表示来源内容冲突并触发降级预测，不单独阻断流程。`tibo_work_timezone` 使用带夏令时规则的 IANA 时区，默认 `America/Los_Angeles`；不得使用固定 UTC 偏移代替。帖子对象必须包含 `post_id`、`published_at_utc`、`url`、`text`、`signal_level`、`classification_evidence`。来源冲突时，`latest_overall_post` 使用带精确 ID、发布时间和 URL 的最新可审计候选；缺少这些字段的更晚搜索摘要只进入 `reasoning_context`。`latest_reset_signal` 只有在精确 ID、发布时间、原文和分类齐全时才能进入 `historical_signals` 作为当前信号，否则模型必须使用 `baseline_fallback`。
 
-`recent_tibo_posts[]` 固定保存按发布时间倒序排列的最新 3—6 条总体动态，每条必须包含 `post_id`、`published_at_utc`、`url`、`text_original`、`text_zh`、`translation_method`、`post_type`、`signal_level`、`classification_evidence`、`is_latest_overall`、`is_latest_reset_signal`。展示等级允许 `0—4`；等级 `4` 表示已完成，禁止降级为 `3`。`translation_method` 固定为 `chatgpt`；`post_type` 只使用 `reset_signal`、`codex`、`limits`、`release`、`other`。第一条必须与 `latest_overall_post` 一致并令 `is_latest_overall = true`。
+`recent_tibo_posts[]` 固定保存并展示本次完整刷新抓到的全部 10—30 条总体动态，不得从历史重置记录补足，也不得截取为 3—6 条。脚本按发布时间严格倒序排列，时间相同时按帖子 ID 倒序排列。每条必须包含 `post_id`、`published_at_utc`、`url`、`text_original`、`text_zh`、`translation_method`、`post_type`、`signal_level`、`classification_evidence`、`is_latest_overall`、`is_latest_reset_signal`。展示等级允许 `0—4`；等级 `4` 表示已完成，禁止降级为 `3`。`translation_method` 固定为 `chatgpt`；`post_type` 只使用 `reset_signal`、`codex`、`limits`、`release`、`other`。第一条必须与 `latest_overall_post` 的 ID、发布时间、URL 和原文完全一致并令 `is_latest_overall = true`；每条 URL 必须含与自身一致的 `/status/<post_id>`。脚本按 X Snowflake ID 核验发布时间，允许来源最多 60 秒的时间精度差，超出即阻断。
 
 `sources[]` 必须包含 `source_id`、`name`、`url`、`retrieved_at_utc`、`retrieval_method`、`status`、`fresh`、`evidence_ref`。`retrieval_method` 只能是 `chatgpt_remote_web_search` 或 `remote_connector`。`status` 可使用 `ok`、`conflict` 或 `failed`；`conflict` 表示抓取成功但内容与另一来源不一致，仍计入新鲜远程来源数量，只有 `failed` 不计入。
 
@@ -58,8 +58,9 @@
 
 ## 刷新契约
 
-- 指纹字段固定为：数据结构版本、模型版本、最新总体帖子 ID/时间、最新重置相关帖子 ID/时间/等级、最近确认重置 ID/时间、OpenAI 状态和活动事故 ID。
-- `fetched_at` 只校验本次抓取是否新鲜，不参与指纹。
-- 指纹只用于产物审计和防倒退检查，不得决定是否继续执行。
-- 无论指纹是否变化，每次都完整抓取、翻译、解释、运行模型、回测并生成产物。
+- 快速门禁先校验现有近期时间线的数量、顺序及 ID/时间/URL/正文绑定，再比较最新总体帖子精确 ID 与发布时间；不加载历史、翻译、模型或旧概率正文。
+- 现有 JSON 缺失、损坏、schema/model 版本不兼容时返回 `full_refresh`。
+- 同 ID 时返回 `reuse_existing`，不得写文件或重复 POST；发布时间只用于审计和倒退排查，不要求来源具备相同精度。
+- 远程 ID 更新时返回 `full_refresh`，并复用预检数据作为完整刷新第一来源。
+- 远程 ID/时间倒退、缺失或来源不新鲜时返回 `retry_probe`；第二次仍失败则保留现有产物并停止。
 - 完整刷新失败时不得覆盖现有有效产物。

@@ -414,7 +414,7 @@
     function renderTiboPosts(posts) {
       const target = $("tibo-list"); target.replaceChildren();
       if (!posts.length) { target.append(node("div", "empty", "没有可展示的近期 Tibo 动态")); return; }
-      posts.forEach((post) => {
+      [...posts].sort((a, b) => new Date(b.published_at_utc) - new Date(a.published_at_utc) || String(b.post_id).localeCompare(String(a.post_id), undefined, { numeric: true })).forEach((post) => {
         const card = node("article", `tibo-card${post.is_latest_reset_signal ? " featured" : ""}`);
         const meta = node("div", "tibo-meta");
         meta.append(node("span", "", localTime(post.published_at_utc, true)));
