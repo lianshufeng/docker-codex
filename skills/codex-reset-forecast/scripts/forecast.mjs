@@ -169,6 +169,10 @@ function mergeRecentPosts(baseItems, newItems) {
   const merged = new Map(baseItems.filter(Boolean).map((item) => [String(item.post_id), item]));
   for (const item of newItems.filter(Boolean)) {
     const key = String(item.post_id ?? "");
+    if (item.exclude === true) {
+      merged.delete(key);
+      continue;
+    }
     if (!merged.has(key) || item.correction === true) merged.set(key, item);
   }
   return [...merged.values()];
@@ -186,8 +190,15 @@ function expandCompactInput(rawInput) {
     signal_level: Number(post.level ?? 0),
     ...(post.evidence ? { classification_evidence: String(post.evidence) } : {}),
     ...(post.correction === true ? { correction: true } : {}),
+    ...(post.exclude === true ? { exclude: true } : {}),
+    ...(post.confirmed_event === false ? { confirmed_event: false } : {}),
   }));
   const postsById = new Map(posts.map((post) => [post.post_id, post]));
+  const completedResetEvents = posts.filter((post) => post.exclude !== true && post.confirmed_event !== false && post.post_type === "reset_signal" && post.signal_level === 4).map((post) => ({
+    event_id: `reset-${post.post_id}`, event_type: "confirmed_reset", announced_at_utc: post.published_at_utc,
+    effective_at_utc: null, post_id: post.post_id, source_url: post.url, confidence: 1,
+    reason_tags: ["tibo_announcement"], included_in_training: true, exclusion_reason: null,
+  }));
   return {
     current: { as_of_utc: rawInput.as_of_utc, cross_source_consistent: rawInput.cross_source_consistent !== false, tibo_work_timezone: rawInput.tibo_work_timezone ?? DEFAULT_WORK_TIMEZONE, recent_tibo_posts: posts },
     sources: rawInput.sources.map((source) => {
@@ -202,7 +213,7 @@ function expandCompactInput(rawInput) {
       };
     }),
     refresh: { checked_at_utc: rawInput.as_of_utc, last_full_refresh_at_utc: rawInput.as_of_utc, status_indicator: rawInput.status_indicator ?? "unknown", active_incident_id: rawInput.active_incident_id ?? null },
-    reasoning_context: rawInput.reasoning_context ?? {}, historical_events: [], historical_signals: [], historical_contexts: [],
+    reasoning_context: rawInput.reasoning_context ?? {}, historical_events: completedResetEvents, historical_signals: [], historical_contexts: [],
   };
 }
 
@@ -217,6 +228,8 @@ function mergeBaseHistory(rawInput, baseHistoryPath) {
     current: {
       ...base.current,
       ...rawInput.current,
+      latest_overall_post: rawInput.current?.latest_overall_post ?? null,
+      latest_reset_signal: rawInput.current?.latest_reset_signal ?? null,
       recent_tibo_posts: mergeRecentPosts(base.current?.recent_tibo_posts ?? [], rawInput.current?.recent_tibo_posts ?? []),
     },
     historical_events: mergeByKey(base.history.events, rawInput.historical_events ?? [], "event_id"),
@@ -1890,10 +1903,15 @@ function smokeTest() {
   };
   const compactValidation = validateSnapshot(mergeBaseHistory(compact, null));
   if (compactValidation.action !== "proceed") throw new Error(`快速自检未接受紧凑当前证据格式：${compactValidation.blocked_reasons.join("；")}`);
+  const completedCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4 }], sources: [] });
+  if (completedCompact.historical_events[0]?.event_id !== `reset-${compact.posts[0].id}`) throw new Error("快速自检未从已完成重置帖生成确认事件");
+  const companionCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4, confirmed_event: false }], sources: [] });
+  if (companionCompact.historical_events.length) throw new Error("快速自检未抑制同一帖子串的重复确认事件");
   if (normalizeRecentPost({ post_id: "alias", published_at_utc: new Date().toISOString(), post_type: "general" }).post_type !== "other") throw new Error("快速自检未归一化 general 类型");
   const preservedPost = mergeRecentPosts([{ post_id: "same", text_original: "verified" }], [{ post_id: "same", text_original: "summary" }])[0];
   const correctedPost = mergeRecentPosts([{ post_id: "same", text_original: "old" }], [{ post_id: "same", text_original: "corrected", correction: true }])[0];
-  if (preservedPost.text_original !== "verified" || correctedPost.text_original !== "corrected") throw new Error("快速自检基座帖子防覆盖或显式修正失败");
+  const excludedPosts = mergeRecentPosts([{ post_id: "same", text_original: "wrong" }], [{ post_id: "same", exclude: true }]);
+  if (preservedPost.text_original !== "verified" || correctedPost.text_original !== "corrected" || excludedPosts.length) throw new Error("快速自检基座帖子防覆盖、显式修正或排除失败");
   const compactReasoningInput = syntheticInput();
   compactReasoningInput.reasoning_context = { evidence_summary: "单份全局证据摘要。", evidence_refs: ["source:one", "source:two"] };
   if (validateSnapshot(compactReasoningInput).action !== "proceed") throw new Error("快速自检未接受紧凑全局证据摘要");

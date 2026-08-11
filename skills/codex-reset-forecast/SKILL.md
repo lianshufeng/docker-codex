@@ -3,13 +3,13 @@ name: codex-reset-forecast
 description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置信号、重置概率或希望预测 Codex reset 时使用。默认先读取现有预测 JSON，再通过一次远程实时抓取比较 Tibo 最新总体帖子 ID；ID 相同则立即复用，只有缺少有效 JSON、发现新 ID 或用户明确强制刷新时才抓取当前证据并重算，稳定历史默认由脚本本地复用。禁止本地直连和 AI 自行修改概率。
 ---
 
-> 技能版本：3.15.4（5.4-mini 固定入口）
+> 技能版本：3.15.7（5.4-mini 固定入口）
 
 ## 5.4-mini 固定入口（必须先执行）
 
 首个本地命令必须是 `node /home/node/.agents/skills/codex-reset-forecast/scripts/forecast.mjs --state /workspace/codex-reset-forecast.json`。路径固定，禁止用 `pwd`、`ls`、`rg`、`find`、`sed`、`jq` 探测，也不得读取脚本、资产、`references/`、manifest 或目标 JSON；本文件已包含正常执行所需全部契约。`--state` 会在目标不存在时返回内置基座，并提供复用回答所需的紧凑摘要。
 
-一次批量远程搜索同时覆盖 Tibo/X 最新活动、精确 ID、`codexreset.org`、`codex-reset.com/tibo` 和 OpenAI 官方状态；从全部结果取不早于 `probe_floor_post_id` 的最大可绑定 ID。随后直接运行 `node .../forecast.mjs --state /workspace/codex-reset-forecast.json --probe-post-id <ID> --probe-post-at <UTC> --probe-post-url <URL> --probe-source-url <来源URL> --probe-checked-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`。`retry_probe` 只补缺口，不重复搜索已确认字段。
+一次批量远程抓取必须直接读取 `https://codex-reset.com/api/feed`，并同时覆盖 Tibo/X `Posts` 页最新动态、精确 ID、`codexreset.org`、`codex-reset.com/tibo` 和 OpenAI 官方状态；禁止只用旧 ID 的精确搜索证明“没有更新”。“最新总体动态”严格指 X `Posts` 流：只接受主帖，以及 `is_reply=true` 且 `replying_to="thsottiaux"` 的自身帖子串补充；排除发给其他账号的普通 `Replies` 动态。Feed 仅在 `stale=false` 且 `fetched_at` 新鲜时参与发现，从其符合上述规则的 `tweets[]` 和其他结果取不早于 `probe_floor_post_id` 的最大可绑定 ID；任一来源发现更大的合格 ID 就禁止以旧 ID probe 或复用。随后直接运行 `node .../forecast.mjs --state /workspace/codex-reset-forecast.json --probe-post-id <ID> --probe-post-at <UTC> --probe-post-url <URL> --probe-source-url <来源URL> --probe-checked-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`；`--probe-checked-at` 必须现场取当前 UTC，禁止使用 Feed 的 `fetched_at`。`retry_probe` 只补缺口，不重复搜索已确认字段。
 
 远程搜索后必须实际执行上述 probe 命令；“搜索结果 ID 看起来相同”不等于门禁通过。只有 `--state` 已给出 `result_reusable=true`，且 probe 明确返回 `action="reuse_existing"`，才允许复用并结束；任一条件不满足都必须完整刷新。
 
@@ -24,13 +24,13 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 1. `COLLECT`：仅用远程实时能力获取当前紧凑增量；本地不得联网。内置基座视为有效历史，除非用户明确要求重建历史。
 2. `RUN`：完整刷新禁止写输入文件。原样用带 TTY 的 `exec_command` 启动 `stty -echo 2>/dev/null || true; IFS= read -r CODEX_RESET_DELTA; stty echo 2>/dev/null || true; export CODEX_RESET_DELTA; node /home/node/.agents/skills/codex-reset-forecast/scripts/forecast.mjs --input-env CODEX_RESET_DELTA --print-report`（有可复用历史时加 `--base-history /workspace/codex-reset-forecast.json`）；取得 session ID 后用 `write_stdin` 发送不超过 3000 UTF-8 字节的单行紧凑 JSON 加换行。不要改写命令，不用管道、`printf`、heredoc、内联 JSON、base64 或 `apply_patch`。
 
-紧凑 JSON 固定为 `{"as_of_utc":"UTC","posts":[{"id":"ID","at":"UTC","url":"X URL","text":"英文","type":"other","level":0}],"sources":[{"id":"x","url":"来源URL","group":"x_original","scopes":["latest_overall"],"post_id":"ID"},{"id":"mirror","url":"独立来源URL","group":"search_engine","scopes":["latest_overall"],"post_id":"ID"},{"id":"official","url":"https://status.openai.com/","group":"openai_official","scopes":["official_status"]}],"status_indicator":"operational"}`。`as_of_utc` 必须原样使用 probe 返回的 `checked_at_utc`；若跳过 probe，先运行 `date -u +%Y-%m-%dT%H:%M:%SZ`，禁止猜测、取整或使用当天零点。只提交基座后的新增/修正帖子；默认省略 reasoning 和三个历史数组。`latest_overall` 来源必须各自使用不同 URL；`fetched_at` 只有来源正文明确给出时才填。若确实超过 3000 字节，分多次 `write_stdin`，只在最后一段加换行。
+紧凑 JSON 固定为 `{"as_of_utc":"UTC","posts":[{"id":"ID","at":"UTC","url":"X URL","text":"英文","zh":"中文","type":"TYPE","level":LEVEL,"evidence":"分类依据","confirmed_event":true}],"sources":[{"id":"x","url":"来源URL","group":"x_original","scopes":["latest_overall"],"post_id":"ID"},{"id":"mirror","url":"独立来源URL","group":"search_engine","scopes":["latest_overall"],"post_id":"ID"},{"id":"official","url":"https://status.openai.com/","group":"openai_official","scopes":["official_status"]}],"status_indicator":"operational"}`。`posts[]` 必须包含基座后抓到的每条合格增量，禁止只提交最大 ID；已误收的普通回复用 `{"id":"ID","exclude":true}` 删除。英文明确表示 `have been reset`、`I've reset`、`I have reset` 或同义的已完成 Codex 全局重置时，固定填 `type:"reset_signal",level:4`并给出 `zh` 和 `evidence`；同一重置帖子串只有信息最完整的一条填 `confirmed_event:true`，其他已完成表述填 `confirmed_event:false`，避免重复计数；脚本会确定性生成对应的确认重置事件。`as_of_utc` 必须原样使用 probe 返回的 `checked_at_utc`；若跳过 probe，先运行 `date -u +%Y-%m-%dT%H:%M:%SZ`，禁止猜测、取整或使用当天零点。只提交基座后的新增/修正帖子；默认省略 reasoning 和三个历史数组。`latest_overall` 来源必须各自使用不同 URL；`fetched_at` 只有来源正文明确给出时才填。若确实超过 3000 字节，分多次 `write_stdin`，只在最后一段加换行。
 
 正常执行不调用 `--help`、`--smoke-test`、`--self-test`，不读取脚本，不回读完整 JSON。脚本返回 `blocked` 后不得自行生成概率。
 
 ## 请求轮次预算
 
-- 首次批量远程搜索同时覆盖最新 Tibo/X、精确 ID、两个 tracker 和 OpenAI 官方状态；完整刷新复用这批证据，只补缺失字段，禁止逐查询、逐 URL 调用。
+- 首次批量远程抓取同时直读 `https://codex-reset.com/api/feed` 并覆盖最新 Tibo/X `Posts`、精确 ID、两个 tracker 和 OpenAI 官方状态；完整刷新必须复用这批证据中的全部合格增量，只补缺失字段，禁止逐查询、逐 URL 调用。
 - 快速复用通常不超过 3 次工具调用，完整刷新通常不超过 5 次；这是成本目标，不是停止门禁。
 - 缺字段或候选早于本地最新帖子时只补缺口，直到门禁完整或远程来源确实不可用。
 
