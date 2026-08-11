@@ -1,6 +1,6 @@
 # 远程输入数据契约
 
-只把 ChatGPT/Codex 远程实时 Web Search、远程网页工具或远程连接器返回的数据整理为输入 JSON。本地脚本不得联网。
+先用 SKILL.md 指定的 `--collect-live` 确定性命令建立实时完整性清单，再把远程实时 Web Search、远程网页工具或远程连接器补充的正文与来源整理为输入 JSON。除该清单命令外，本地脚本不得联网。
 
 ## 顶层结构
 
@@ -16,7 +16,7 @@
 }
 ```
 
-正常增量优先使用紧凑格式：顶层 `as_of_utc`、`posts[]`、`sources[]`、`status_indicator`。帖子别名为 `id/at/url/text/type/level/zh/evidence/correction`；来源别名为 `id/name/url/group/scopes/post_id/fetched_at/status/ref`。脚本自动补齐远程方法、抓取时间和 `latest_overall` 的帖子绑定。`latest_overall` 来源必须提供 `post_id`，并在 `posts[]` 中存在同 ID 记录；不同来源 URL 和分组必须真实独立。基座已有同 ID 帖子默认保留已核验原文和分类，只有来源明确证明旧记录错误时才用 `correction:true` 覆盖。默认省略 reasoning 与历史数组。
+正常增量优先使用紧凑格式：顶层 `as_of_utc`、`posts[]`、`sources[]`、`status_indicator`。帖子别名为 `id/at/url/text/type/level/zh/evidence/correction`；来源别名为 `id/name/url/group/scopes/post_id/fetched_at/status/ref`。正式生成必须同时提供 `--live-collection`，且 `posts[]` 与基座合并后必须覆盖清单的每个 `required_posts[].post_id`；清单可发现最大游标之前遗漏的中间帖子，并用 X oEmbed/feed 的 `text_original` 确定性修复摘要、截短或改写。脚本自动补齐远程方法、抓取时间和 `latest_overall` 的帖子绑定。`latest_overall` 来源必须提供 `post_id`，并绑定清单的 `latest_overall_post`；不同来源 URL 和分组必须真实独立。默认省略 reasoning 与历史数组。
 
 本文件只在快速门禁决定完整刷新后读取。`refresh` 包含 `checked_at_utc`、`last_full_refresh_at_utc`、`status_indicator` 和 `active_incident_id`。使用 `--base-history` 时，三个历史数组只提交新增或修正记录；无基座时再读取 [历史重建契约](history-rebuild.md)。
 
@@ -43,7 +43,7 @@
 
 - 快速门禁先校验现有近期时间线的数量、顺序及 ID/时间/URL/正文绑定，再比较最新总体帖子精确 ID 与发布时间；不加载历史、翻译、模型或旧概率正文。
 - 现有 JSON 缺失、损坏、schema/model 版本不兼容时返回 `full_refresh`。
-- 同 ID 时返回 `reuse_existing`，不得写文件或重复 POST；发布时间只用于审计和倒退排查，不要求来源具备相同精度。
+- 同 ID 且完整性清单无缺口、无原文不匹配时返回 `reuse_existing`，不得写文件或重复 POST；存在 `collection_gap` 或 `collection_mismatch` 时即使最大 ID 相同也必须完整刷新。
 - 远程 ID 更新时返回 `full_refresh`，并复用预检数据作为完整刷新第一来源。
 - 远程 ID/时间倒退、缺失或来源不新鲜时返回 `retry_probe`；继续针对缺口批量补抓，只有确认远程来源不可用时才保留现有产物并停止。
 - 完整刷新失败时不得覆盖现有有效产物。

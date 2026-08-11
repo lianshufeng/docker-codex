@@ -27,6 +27,9 @@ const X_EPOCH_MS = 1_288_834_974_657n;
 const POST_TIME_TOLERANCE_MS = 60_000;
 const REUSE_MAX_AGE_MINUTES = 20;
 const FULL_REFRESH_MAX_AGE_HOURS = 24;
+const LIVE_COLLECTION_MAX_AGE_MINUTES = 20;
+const TIBO_X_URL = "https://x.com/thsottiaux";
+const TIBO_FEED_URL = "https://codex-reset.com/api/feed";
 const KNOWN_LATEST_POST_FLOOR = { post_id: "2086353229894529148", published_at_utc: "2026-08-09T07:25:47.232Z", url: "https://x.com/thsottiaux/status/2086353229894529148" };
 const COOLDOWN_HOUR_CANDIDATES = [6, 12, 24];
 const KNOWN_POST_TEXT_REPAIRS = new Map(Object.entries({
@@ -53,7 +56,7 @@ const FEATURE_KEYS = [
 ];
 
 function parseArgs(argv) {
-  const args = { input: null, inputOnce: null, inputBase64: null, inputEnv: null, baseHistory: null, state: null, validateInput: null, validateInputBase64: null, probeBase64: null, probePostId: null, probePostAt: null, probePostUrl: null, probeSourceUrl: null, probeCheckedAt: null, existing: null, backtest: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, report: null, printReport: false, postUrl: null, postToken: null, selfTest: false, smokeTest: false, help: false };
+  const args = { input: null, inputOnce: null, inputBase64: null, inputEnv: null, baseHistory: null, state: null, collectLive: null, liveCollection: null, validateInput: null, validateInputBase64: null, probeBase64: null, probePostId: null, probePostAt: null, probePostUrl: null, probeSourceUrl: null, probeCheckedAt: null, existing: null, backtest: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, report: null, printReport: false, postUrl: null, postToken: null, selfTest: false, smokeTest: false, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--input") args.input = argv[++i];
     else if (argv[i] === "--input-once") args.inputOnce = argv[++i];
@@ -61,6 +64,8 @@ function parseArgs(argv) {
     else if (argv[i] === "--input-env") args.inputEnv = argv[++i];
     else if (argv[i] === "--base-history") args.baseHistory = path.resolve(argv[++i]);
     else if (argv[i] === "--state") args.state = path.resolve(argv[++i]);
+    else if (argv[i] === "--collect-live") args.collectLive = path.resolve(argv[++i]);
+    else if (argv[i] === "--live-collection") args.liveCollection = path.resolve(argv[++i]);
     else if (argv[i] === "--validate-input") args.validateInput = argv[++i];
     else if (argv[i] === "--validate-input-base64") args.validateInputBase64 = argv[++i];
     else if (argv[i] === "--probe-base64") args.probeBase64 = argv[++i];
@@ -87,10 +92,11 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.15.4",
+    "Codex Reset Forecast 3.16.1",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
+    "实时完整性清单：node scripts/forecast.mjs --collect-live <snapshot.json> --state <existing.json>",
     "文件增量（兼容）：node scripts/forecast.mjs --input <delta.json> --base-history <existing.json> --print-report [--output <json>]",
     "完整历史重建：node scripts/forecast.mjs --input <snapshot.json> --print-report [--output <json>]",
     "完整刷新（兼容）：node scripts/forecast.mjs --input-base64 <base64|-> [--output <json>]",
@@ -306,6 +312,148 @@ function compareRecentPosts(a, b) {
 
 function maxRecentPostById(posts) {
   return (Array.isArray(posts) ? posts : []).filter((post) => /^\d+$/.test(String(post?.post_id ?? ""))).reduce((latest, post) => !latest || BigInt(post.post_id) > BigInt(latest.post_id) ? post : latest, null);
+}
+
+async function fetchLiveText(url, label) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "text/html,application/json", "User-Agent": "Mozilla/5.0 CodexResetForecast/3.16" },
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`${label}抓取失败：HTTP ${response.status}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function readLiveCollection(collectionPath) {
+  if (!collectionPath) throw new Error("缺少 --live-collection 完整性清单");
+  const collection = JSON.parse(readUtf8NoBom(collectionPath));
+  const checkedAt = iso(collection.checked_at_utc, "live_collection.checked_at_utc");
+  const ageMinutes = (Date.now() - new Date(checkedAt).getTime()) / 60_000;
+  if (collection.schema_version !== 1 || ageMinutes < -5 || ageMinutes > LIVE_COLLECTION_MAX_AGE_MINUTES) throw new Error("实时完整性清单无效或已超过 20 分钟");
+  if (!Array.isArray(collection.required_posts) || !collection.required_posts.length) throw new Error("实时完整性清单没有帖子记录");
+  return collection;
+}
+
+function collectionGaps(collection, posts) {
+  const knownIds = new Set((Array.isArray(posts) ? posts : []).map((post) => String(post?.post_id ?? "")));
+  return collection.required_posts.map((post) => String(post?.post_id ?? "")).filter((id) => /^\d+$/.test(id) && !knownIds.has(id));
+}
+
+function collectionMismatches(collection, posts) {
+  const postsById = new Map((Array.isArray(posts) ? posts : []).map((post) => [String(post?.post_id ?? ""), post]));
+  return collection.required_posts.filter((required) => {
+    const existing = postsById.get(String(required.post_id));
+    return existing && required.text_original && String(existing.text_original ?? existing.text ?? "") !== required.text_original;
+  }).map((post) => String(post.post_id));
+}
+
+function assertLiveCollectionComplete(rawInput, collectionPath) {
+  const collection = readLiveCollection(collectionPath);
+  const asOf = iso(rawInput?.current?.as_of_utc, "current.as_of_utc");
+  if (asOf !== iso(collection.checked_at_utc, "live_collection.checked_at_utc")) throw new Error("as_of_utc 必须与实时完整性清单 checked_at_utc 完全一致");
+  const posts = rawInput?.current?.recent_tibo_posts ?? [];
+  const gaps = collectionGaps(collection, posts);
+  if (gaps.length) throw new Error(`实时完整性校验失败，仍缺少帖子：${gaps.join(",")}`);
+  const postsById = new Map(posts.map((post) => [String(post?.post_id ?? ""), post]));
+  const latestOverallId = String(collection.latest_overall_post?.post_id ?? "");
+  for (const post of posts) post.is_latest_overall = String(post?.post_id ?? "") === latestOverallId;
+  if (!postsById.has(latestOverallId)) throw new Error("实时完整性清单中的 X Posts 顶部主帖不在合并时间线中");
+  for (const required of collection.required_posts) {
+    const post = postsById.get(String(required.post_id));
+    post.published_at_utc = required.published_at_utc;
+    post.url = required.url;
+    if (required.text_original) post.text_original = required.text_original;
+  }
+  return collection;
+}
+
+function decodeHtmlEntities(value) {
+  return String(value).replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, decimal) => String.fromCodePoint(Number(decimal)))
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+function textFromOembed(raw, postId) {
+  const html = String(JSON.parse(raw)?.html ?? "");
+  const paragraph = html.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1];
+  if (!paragraph) throw new Error(`X oEmbed 未返回帖子 ${postId} 的完整正文`);
+  return decodeHtmlEntities(paragraph.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, "")).replace(/\n{3,}/g, "\n\n").trim();
+}
+
+async function collectLiveSnapshot(statePath, collectionPath) {
+  if (!statePath) throw new Error("--collect-live 必须同时提供 --state");
+  const usingSeed = !fs.existsSync(statePath);
+  const existing = JSON.parse(usingSeed ? readBundledBaseline() : readUtf8NoBom(statePath));
+  const existingPosts = existing.current?.recent_tibo_posts ?? [];
+  const existingIds = new Set(existingPosts.map((post) => String(post?.post_id ?? "")));
+  const floorPost = maxRecentPostById(existingPosts) ?? KNOWN_LATEST_POST_FLOOR;
+  const [xHtml, feedText] = await Promise.all([
+    fetchLiveText(TIBO_X_URL, "Tibo X Posts"),
+    fetchLiveText(TIBO_FEED_URL, "Tibo feed"),
+  ]);
+  const feed = JSON.parse(feedText);
+  const feedFetchedAt = iso(feed.fetched_at, "feed.fetched_at");
+  const feedAgeMinutes = (Date.now() - new Date(feedFetchedAt).getTime()) / 60_000;
+  if (feed.stale !== false || feedAgeMinutes < -5 || feedAgeMinutes > LIVE_COLLECTION_MAX_AGE_MINUTES) throw new Error("Tibo feed 已过期，无法建立完整性清单");
+
+  const xPostIds = [];
+  const seenXIds = new Set();
+  for (const match of xHtml.matchAll(/\/thsottiaux\/status\/(\d{15,22})/g)) {
+    if (!seenXIds.has(match[1])) {
+      seenXIds.add(match[1]);
+      xPostIds.push(match[1]);
+    }
+  }
+  if (!xPostIds.length) throw new Error("X Posts 页面未返回任何可验证的 Tibo 顶层帖子 ID");
+  const visibleFloorId = xPostIds.reduce((lowest, id) => BigInt(id) < BigInt(lowest) ? id : lowest, xPostIds[0]);
+  const required = new Map(xPostIds.map((id) => [id, {
+    post_id: id,
+    published_at_utc: new Date(snowflakeTimestampMs(id)).toISOString(),
+    url: `${TIBO_X_URL}/status/${id}`,
+    discovered_by: ["x_posts"],
+  }]));
+  const oembedTexts = await Promise.all(xPostIds.map(async (id) => [id, textFromOembed(await fetchLiveText(`https://publish.twitter.com/oembed?omit_script=true&dnt=true&url=${encodeURIComponent(`${TIBO_X_URL}/status/${id}`)}`, `X oEmbed ${id}`), id)]));
+  for (const [id, textOriginal] of oembedTexts) required.get(id).text_original = textOriginal;
+  for (const tweet of Array.isArray(feed.tweets) ? feed.tweets : []) {
+    const id = String(tweet?.id ?? "");
+    const eligible = tweet?.is_reply !== true || String(tweet?.replying_to ?? "").toLowerCase() === "thsottiaux";
+    if (!eligible || !/^\d+$/.test(id) || BigInt(id) < BigInt(visibleFloorId)) continue;
+    const prior = required.get(id);
+    required.set(id, {
+      post_id: id,
+      published_at_utc: iso(tweet.at ?? new Date(snowflakeTimestampMs(id)).toISOString(), `feed.tweets.${id}.at`),
+      url: String(tweet.url ?? `${TIBO_X_URL}/status/${id}`),
+      text_original: prior?.text_original ?? String(tweet.text ?? ""),
+      discovered_by: [...new Set([...(prior?.discovered_by ?? []), tweet.is_reply === true ? "feed_self_thread" : "feed_top_level"])],
+    });
+  }
+  const requiredPosts = [...required.values()].sort((a, b) => BigInt(a.post_id) < BigInt(b.post_id) ? -1 : 1);
+  const probePost = [...requiredPosts, floorPost].reduce((latest, post) => BigInt(post.post_id) > BigInt(latest.post_id) ? post : latest);
+  const snapshot = {
+    schema_version: 1,
+    checked_at_utc: new Date().toISOString(),
+    state_path: path.resolve(statePath),
+    state_source: usingSeed ? "bundled_seed" : "existing_output",
+    state_probe_floor_post_id: String(floorPost.post_id),
+    latest_overall_post: required.get(xPostIds[0]),
+    probe_post: probePost,
+    visible_x_post_ids: xPostIds,
+    required_posts: requiredPosts,
+    missing_from_state: requiredPosts.filter((post) => !existingIds.has(post.post_id)).map((post) => post.post_id),
+    mismatched_in_state: collectionMismatches({ required_posts: requiredPosts }, existingPosts),
+    feed_fetched_at_utc: feedFetchedAt,
+  };
+  fs.mkdirSync(path.dirname(collectionPath), { recursive: true });
+  const temporary = `${collectionPath}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(temporary, collectionPath);
+  return snapshot;
 }
 
 function localTimeParts(value, timeZone) {
@@ -1928,6 +2076,23 @@ function smokeTest() {
   if (companionCompact.historical_events.length) throw new Error("快速自检未抑制同一帖子串的重复确认事件");
   const latestCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], latest: true }], sources: [] });
   if (latestCompact.current.recent_tibo_posts[0]?.is_latest_overall !== true) throw new Error("快速自检未保留顶部帖子串主帖标记");
+  const collectionDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-reset-collection-"));
+  const collectionPath = path.join(collectionDirectory, "live.json");
+  const collectionInput = structuredClone(compactBase);
+  collectionInput.current.as_of_utc = new Date().toISOString();
+  const requiredPosts = collectionInput.current.recent_tibo_posts.slice(0, 3).map((post) => ({ post_id: post.post_id, published_at_utc: post.published_at_utc, url: post.url, text_original: post.text_original }));
+  fs.writeFileSync(collectionPath, `${JSON.stringify({ schema_version: 1, checked_at_utc: collectionInput.current.as_of_utc, latest_overall_post: collectionInput.current.latest_overall_post, probe_post: maxRecentPostById(requiredPosts), required_posts: requiredPosts })}\n`, "utf8");
+  assertLiveCollectionComplete(collectionInput, collectionPath);
+  const incompleteTimeline = structuredClone(collectionInput);
+  incompleteTimeline.current.recent_tibo_posts = incompleteTimeline.current.recent_tibo_posts.filter((post) => post.post_id !== requiredPosts[1].post_id);
+  let missingPostRejected = false;
+  try { assertLiveCollectionComplete(incompleteTimeline, collectionPath); } catch (error) { missingPostRejected = String(error.message).includes(requiredPosts[1].post_id); }
+  if (!missingPostRejected) throw new Error("快速自检未阻止完整性清单中的中间帖子缺失");
+  const mismatchedTimeline = structuredClone(collectionInput);
+  mismatchedTimeline.current.recent_tibo_posts[0].text_original = "paraphrased";
+  assertLiveCollectionComplete(mismatchedTimeline, collectionPath);
+  if (mismatchedTimeline.current.recent_tibo_posts[0].text_original !== requiredPosts[0].text_original) throw new Error("快速自检未用实时清单恢复帖子原文");
+  fs.rmSync(collectionDirectory, { recursive: true, force: true });
   if (normalizeRecentPost({ post_id: "alias", published_at_utc: new Date().toISOString(), post_type: "general" }).post_type !== "other") throw new Error("快速自检未归一化 general 类型");
   const preservedPost = mergeRecentPosts([{ post_id: "same", text_original: "verified" }], [{ post_id: "same", text_original: "summary" }])[0];
   const correctedPost = mergeRecentPosts([{ post_id: "same", text_original: "old" }], [{ post_id: "same", text_original: "corrected", correction: true }])[0];
@@ -2082,6 +2247,11 @@ async function main() {
   if (args.help) return process.stdout.write(`${usage()}\n`);
   if (args.smokeTest) return smokeTest();
   if (args.selfTest) return selfTest();
+  if (args.collectLive) {
+    const snapshot = await collectLiveSnapshot(args.state, args.collectLive);
+    process.stdout.write(`${JSON.stringify(snapshot)}\n`);
+    return;
+  }
   if (args.state && !args.probeBase64 && !args.probePostId) return process.stdout.write(`${JSON.stringify(compactExistingState(args.state))}\n`);
   if (args.validateInput || args.validateInputBase64) {
     const inputText = readInputText(args.validateInput, args.validateInputBase64);
@@ -2107,12 +2277,20 @@ async function main() {
     return;
   }
   if (args.probeBase64 || args.probePostId) {
+    const collection = readLiveCollection(args.liveCollection);
+    if (args.probePostId && String(args.probePostId) !== String(collection.probe_post?.post_id ?? "")) throw new Error("probe-post-id 必须使用实时完整性清单的 probe_post.post_id");
+    if (args.probeCheckedAt && iso(args.probeCheckedAt, "probe.checked_at_utc") !== iso(collection.checked_at_utc, "live_collection.checked_at_utc")) throw new Error("probe-checked-at 必须使用实时完整性清单的 checked_at_utc");
     const rawProbe = args.probePostId ? {
       checked_at_utc: args.probeCheckedAt,
       latest_overall_post: { post_id: args.probePostId, published_at_utc: args.probePostAt, url: args.probePostUrl },
       sources: [{ name: "remote probe", url: args.probeSourceUrl, retrieved_at_utc: args.probeCheckedAt }],
     } : JSON.parse(readInputText(null, args.probeBase64));
-    const result = runRefreshProbe(rawProbe, args.existing ?? args.state, args.output);
+    let result = runRefreshProbe(rawProbe, args.existing ?? args.state, args.output);
+    const usingSeed = !(args.existing ?? args.state) || !fs.existsSync(args.existing ?? args.state);
+    const existing = JSON.parse(usingSeed ? readBundledBaseline() : readUtf8NoBom(args.existing ?? args.state));
+    const gaps = collectionGaps(collection, existing.current?.recent_tibo_posts);
+    const mismatches = collectionMismatches(collection, existing.current?.recent_tibo_posts);
+    if (gaps.length || mismatches.length) result = { action: "full_refresh", reason: gaps.length ? "collection_gap" : "collection_mismatch", missing_post_ids: gaps, mismatched_post_ids: mismatches, existing_post_id: result.existing_post_id ?? null, remote_post_id: collection.probe_post?.post_id ?? null, checked_at_utc: collection.checked_at_utc, wrote_files: false };
     if (args.postUrl) result.post_deferred = true;
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
@@ -2120,6 +2298,7 @@ async function main() {
   if (!args.input && !args.inputOnce && !args.inputBase64 && !args.inputEnv) throw new Error("必须提供 --input、--input-once、--input-base64 或 --input-env");
   const inputText = args.inputOnce ? readInputOnce(args.inputOnce) : readInputText(args.input, args.inputBase64, args.inputEnv);
   const rawInput = mergeBaseHistory(assertLiveAsOf(JSON.parse(inputText)), args.baseHistory);
+  assertLiveCollectionComplete(rawInput, args.liveCollection);
   const output = runForecast(rawInput);
   if (output.status === "blocked") {
     process.stdout.write(`${JSON.stringify({ status: "blocked", output: args.output, wrote_files: false, preserved_existing: hasUsableExistingForecast(args.output), blocked_reasons: output.blocked_reasons })}\n`);
@@ -2127,6 +2306,7 @@ async function main() {
   }
   writeAtomic(output, args.output);
   const htmlOutput = writeHtmlAtomic(output, args.output);
+  fs.rmSync(args.liveCollection, { force: true });
   const postResult = args.postUrl ? await postGeneratedJson(args.output, args.postUrl, args.postToken) : null;
   if (args.printReport) {
     process.stdout.write(renderMarkdownReport(verifyArtifactBundle(args.output), args.output));
