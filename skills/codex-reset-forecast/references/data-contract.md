@@ -1,6 +1,6 @@
 # 远程输入数据契约
 
-先用 SKILL.md 指定的 `--collect-live` 确定性命令建立实时完整性清单，再把远程实时 Web Search、远程网页工具或远程连接器补充的正文与来源整理为输入 JSON。除该清单命令外，本地脚本不得联网。
+先按 SKILL.md 无参数运行脚本，通过固定 X 代理和 feed 建立实时完整性清单，再把远程实时 Web Search、远程网页工具或远程连接器补充的独立来源整理为输入 JSON。除固定入口的公开页面采集外，本地脚本不得联网。
 
 ## 顶层结构
 
@@ -16,7 +16,7 @@
 }
 ```
 
-正常增量优先使用紧凑格式：顶层 `as_of_utc`、`posts[]`、`sources[]`、`status_indicator`。帖子别名为 `id/at/url/text/type/level/zh/evidence/correction`；来源别名为 `id/name/url/group/scopes/post_id/fetched_at/status/ref`。正式生成必须同时提供 `--live-collection`，且 `posts[]` 与基座合并后必须覆盖清单的每个 `required_posts[].post_id`；清单可发现最大游标之前遗漏的中间帖子，并用 X oEmbed/feed 的 `text_original` 确定性修复摘要、截短或改写。脚本自动补齐远程方法、抓取时间和 `latest_overall` 的帖子绑定。`latest_overall` 来源必须提供 `post_id`，并绑定清单的 `latest_overall_post`；不同来源 URL 和分组必须真实独立。默认省略 reasoning 与历史数组。
+正常增量优先使用紧凑格式：顶层 `as_of_utc`、`posts[]`、`sources[]`、`status_indicator`。帖子别名为 `id/at/url/text/type/level/zh/evidence/correction`；来源别名为 `id/name/url/group/scopes/post_id/fetched_at/status/ref`。正式生成必须同时提供 `--live-collection`，且 `posts[]` 与基座合并后必须覆盖清单的每个 `required_posts[].post_id`；清单可发现最大游标之前遗漏的中间帖子，并用 X 代理单帖页/feed 的 `text_original` 确定性修复摘要、截短或改写。脚本自动补齐远程方法、抓取时间和 `latest_overall` 的帖子绑定。`latest_overall` 来源必须提供 `post_id`，并绑定清单的 `latest_overall_post`；不同来源 URL 和分组必须真实独立。默认省略 reasoning 与历史数组。
 
 本文件只在快速门禁决定完整刷新后读取。`refresh` 包含 `checked_at_utc`、`last_full_refresh_at_utc`、`status_indicator` 和 `active_incident_id`。使用 `--base-history` 时，三个历史数组只提交新增或修正记录；无基座时再读取 [历史重建契约](history-rebuild.md)。
 
@@ -47,6 +47,6 @@
 - 远程 ID 更新时返回 `full_refresh`，并复用预检数据作为完整刷新第一来源。
 - 远程 ID/时间倒退、缺失或来源不新鲜时返回 `retry_probe`；继续针对缺口批量补抓，只有确认远程来源不可用时才保留现有产物并停止。
 - 完整刷新失败时不得覆盖现有有效产物。
-- 存在结构兼容的旧预测时，默认用 `--base-history <existing.json>` 在脚本内部复用历史；工作区没有预测文件时，`--state` 和完整刷新自动使用技能内置只读历史基座，仍只抓当前增量，不重新下载稳定历史。强制刷新或完整重算仍重新抓取当前证据并完整运行模型与回测，只有用户明确要求“重建历史”时才重新下载全部稳定历史。
+- 存在结构兼容的固定预测文件时，正式完整刷新自动在脚本内部复用其历史，无需模型附加参数；工作区没有预测文件时自动使用技能内置只读历史基座，仍只抓当前增量，不重新下载稳定历史。强制刷新或完整重算仍重新抓取当前证据并完整运行模型与回测，只有用户明确要求“重建历史”时才重新下载全部稳定历史。
 - 增量通过带 TTY 的 shell `read` 和一次 `write_stdin` 发送单行压缩 JSON，再由 `--input-env` 读取；关闭 TTY 回显，不写临时文件。禁止 heredoc、内联 JSON、base64 和 `apply_patch`，避免输入差异被重复回显。`--validate-input*` 仅供人工诊断。
 - 正式生成使用 `--print-report`，在同一进程内校验四个固定产物和编码并输出中文 Markdown；不得回读完整 JSON或再调用 `--report`。后者只用于人工诊断或重显已有结果。

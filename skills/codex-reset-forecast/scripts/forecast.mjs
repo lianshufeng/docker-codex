@@ -28,8 +28,12 @@ const POST_TIME_TOLERANCE_MS = 60_000;
 const REUSE_MAX_AGE_MINUTES = 20;
 const FULL_REFRESH_MAX_AGE_HOURS = 24;
 const LIVE_COLLECTION_MAX_AGE_MINUTES = 20;
+const MIN_VISIBLE_X_POSTS = 3;
 const TIBO_X_URL = "https://x.com/thsottiaux";
+const TIBO_X_TRANSPORT_URL = "https://proxy.jpy.wang/x.com/thsottiaux";
 const TIBO_FEED_URL = "https://codex-reset.com/api/feed";
+const DEFAULT_STATE_PATH = "/workspace/codex-reset-forecast.json";
+const DEFAULT_LIVE_COLLECTION_PATH = "/tmp/codex-reset-live.json";
 const KNOWN_LATEST_POST_FLOOR = { post_id: "2086353229894529148", published_at_utc: "2026-08-09T07:25:47.232Z", url: "https://x.com/thsottiaux/status/2086353229894529148" };
 const COOLDOWN_HOUR_CANDIDATES = [6, 12, 24];
 const KNOWN_POST_TEXT_REPAIRS = new Map(Object.entries({
@@ -56,7 +60,7 @@ const FEATURE_KEYS = [
 ];
 
 function parseArgs(argv) {
-  const args = { input: null, inputOnce: null, inputBase64: null, inputEnv: null, baseHistory: null, state: null, collectLive: null, liveCollection: null, validateInput: null, validateInputBase64: null, probeBase64: null, probePostId: null, probePostAt: null, probePostUrl: null, probeSourceUrl: null, probeCheckedAt: null, existing: null, backtest: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, report: null, printReport: false, postUrl: null, postToken: null, selfTest: false, smokeTest: false, help: false };
+  const args = { input: null, inputOnce: null, inputBase64: null, inputEnv: null, baseHistory: null, state: null, startLive: null, collectLive: null, liveCollection: null, validateInput: null, validateInputBase64: null, probeBase64: null, probePostId: null, probePostAt: null, probePostUrl: null, probeSourceUrl: null, probeCheckedAt: null, existing: null, backtest: null, output: path.resolve(process.cwd(), OUTPUT_NAME), renderExisting: null, report: null, printReport: false, postUrl: null, postToken: null, selfTest: false, smokeTest: false, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--input") args.input = argv[++i];
     else if (argv[i] === "--input-once") args.inputOnce = argv[++i];
@@ -64,6 +68,7 @@ function parseArgs(argv) {
     else if (argv[i] === "--input-env") args.inputEnv = argv[++i];
     else if (argv[i] === "--base-history") args.baseHistory = path.resolve(argv[++i]);
     else if (argv[i] === "--state") args.state = path.resolve(argv[++i]);
+    else if (argv[i] === "--start-live") args.startLive = path.resolve(argv[++i]);
     else if (argv[i] === "--collect-live") args.collectLive = path.resolve(argv[++i]);
     else if (argv[i] === "--live-collection") args.liveCollection = path.resolve(argv[++i]);
     else if (argv[i] === "--validate-input") args.validateInput = argv[++i];
@@ -92,10 +97,11 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.16.1",
+    "Codex Reset Forecast 3.16.5",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
+    "安全实时入口：node scripts/forecast.mjs --start-live <snapshot.json> --state <existing.json>",
     "实时完整性清单：node scripts/forecast.mjs --collect-live <snapshot.json> --state <existing.json>",
     "文件增量（兼容）：node scripts/forecast.mjs --input <delta.json> --base-history <existing.json> --print-report [--output <json>]",
     "完整历史重建：node scripts/forecast.mjs --input <snapshot.json> --print-report [--output <json>]",
@@ -318,16 +324,36 @@ async function fetchLiveText(url, label) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    const response = await fetch(url, {
-      headers: { Accept: "text/html,application/json", "User-Agent": "Mozilla/5.0 CodexResetForecast/3.16" },
-      redirect: "follow",
-      signal: controller.signal,
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: { Accept: "text/html,application/json", "User-Agent": "Mozilla/5.0 CodexResetForecast/3.16" },
+        redirect: "follow",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      throw new Error(`${label}抓取失败：${error?.cause?.message ?? error.message}`, { cause: error });
+    }
     if (!response.ok) throw new Error(`${label}抓取失败：HTTP ${response.status}`);
     return await response.text();
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function xPostIdsFromHtml(xHtml) {
+  const ids = [...String(xHtml).matchAll(/\/thsottiaux\/status\/(\d{15,22})/g)].map((match) => match[1]);
+  return [...new Set(ids)].sort((a, b) => BigInt(a) > BigInt(b) ? -1 : BigInt(a) < BigInt(b) ? 1 : 0);
+}
+
+function classifyVisibleXPostIds(xHtml, feedTweets) {
+  const tweetsById = new Map((Array.isArray(feedTweets) ? feedTweets : []).map((tweet) => [String(tweet?.id ?? ""), tweet]));
+  const eligible = xPostIdsFromHtml(xHtml).filter((id) => {
+    const tweet = tweetsById.get(id);
+    return tweet?.is_reply !== true || String(tweet?.replying_to ?? "").toLowerCase() === "thsottiaux";
+  });
+  const selfThreadIds = new Set([...tweetsById].filter(([, tweet]) => tweet?.is_reply === true && String(tweet?.replying_to ?? "").toLowerCase() === "thsottiaux").map(([id]) => id));
+  return { eligible, topLevel: eligible.filter((id) => !selfThreadIds.has(id)) };
 }
 
 function readLiveCollection(collectionPath) {
@@ -349,7 +375,7 @@ function collectionMismatches(collection, posts) {
   const postsById = new Map((Array.isArray(posts) ? posts : []).map((post) => [String(post?.post_id ?? ""), post]));
   return collection.required_posts.filter((required) => {
     const existing = postsById.get(String(required.post_id));
-    return existing && required.text_original && String(existing.text_original ?? existing.text ?? "") !== required.text_original;
+    return existing && required.text_original && comparableXText(existing.text_original ?? existing.text ?? "") !== comparableXText(required.text_original);
   }).map((post) => String(post.post_id));
 }
 
@@ -379,11 +405,24 @@ function decodeHtmlEntities(value) {
     .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 
-function textFromOembed(raw, postId) {
-  const html = String(JSON.parse(raw)?.html ?? "");
-  const paragraph = html.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1];
-  if (!paragraph) throw new Error(`X oEmbed 未返回帖子 ${postId} 的完整正文`);
-  return decodeHtmlEntities(paragraph.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, "")).replace(/\n{3,}/g, "\n\n").trim();
+function comparableXText(value) {
+  return decodeHtmlEntities(decodeHtmlEntities(String(value))).replace(/\s*https:\/\/t\.co\/\S+/g, "").replace(/\s+/g, " ").trim();
+}
+
+function xStatusTransportUrl(postId) {
+  return `${TIBO_X_TRANSPORT_URL}/status/${postId}`;
+}
+
+function textFromXStatusHtml(raw, postId) {
+  const html = String(raw);
+  const title = html.match(/<title>Tibo on X: &quot;([\s\S]*?)&quot; \/ X<\/title>/i)?.[1];
+  if (!title) throw new Error(`X 代理未返回帖子 ${postId} 的标题正文`);
+  const titleText = decodeHtmlEntities(decodeHtmlEntities(title)).trim();
+  const noteTexts = [...html.matchAll(/__typename:"NoteTweet",text:"((?:\\.|[^"\\])*)"/g)].map((match) => {
+    try { return decodeHtmlEntities(decodeHtmlEntities(JSON.parse(`"${match[1]}"`))).trim(); } catch { return ""; }
+  }).filter(Boolean);
+  const matchingNote = noteTexts.filter((text) => text.startsWith(titleText)).sort((a, b) => b.length - a.length)[0];
+  return matchingNote ?? titleText;
 }
 
 async function collectLiveSnapshot(statePath, collectionPath) {
@@ -394,7 +433,7 @@ async function collectLiveSnapshot(statePath, collectionPath) {
   const existingIds = new Set(existingPosts.map((post) => String(post?.post_id ?? "")));
   const floorPost = maxRecentPostById(existingPosts) ?? KNOWN_LATEST_POST_FLOOR;
   const [xHtml, feedText] = await Promise.all([
-    fetchLiveText(TIBO_X_URL, "Tibo X Posts"),
+    fetchLiveText(TIBO_X_TRANSPORT_URL, "Tibo X Posts 代理"),
     fetchLiveText(TIBO_FEED_URL, "Tibo feed"),
   ]);
   const feed = JSON.parse(feedText);
@@ -402,15 +441,9 @@ async function collectLiveSnapshot(statePath, collectionPath) {
   const feedAgeMinutes = (Date.now() - new Date(feedFetchedAt).getTime()) / 60_000;
   if (feed.stale !== false || feedAgeMinutes < -5 || feedAgeMinutes > LIVE_COLLECTION_MAX_AGE_MINUTES) throw new Error("Tibo feed 已过期，无法建立完整性清单");
 
-  const xPostIds = [];
-  const seenXIds = new Set();
-  for (const match of xHtml.matchAll(/\/thsottiaux\/status\/(\d{15,22})/g)) {
-    if (!seenXIds.has(match[1])) {
-      seenXIds.add(match[1]);
-      xPostIds.push(match[1]);
-    }
-  }
-  if (!xPostIds.length) throw new Error("X Posts 页面未返回任何可验证的 Tibo 顶层帖子 ID");
+  const feedTweets = Array.isArray(feed.tweets) ? feed.tweets : [];
+  const { eligible: xPostIds, topLevel: xTopLevelPostIds } = classifyVisibleXPostIds(xHtml, feedTweets);
+  if (xTopLevelPostIds.length < MIN_VISIBLE_X_POSTS) throw new Error(`X Posts 页面只返回 ${xTopLevelPostIds.length} 条可验证的 Tibo 主帖，少于最近 ${MIN_VISIBLE_X_POSTS} 条完整性窗口`);
   const visibleFloorId = xPostIds.reduce((lowest, id) => BigInt(id) < BigInt(lowest) ? id : lowest, xPostIds[0]);
   const required = new Map(xPostIds.map((id) => [id, {
     post_id: id,
@@ -418,9 +451,7 @@ async function collectLiveSnapshot(statePath, collectionPath) {
     url: `${TIBO_X_URL}/status/${id}`,
     discovered_by: ["x_posts"],
   }]));
-  const oembedTexts = await Promise.all(xPostIds.map(async (id) => [id, textFromOembed(await fetchLiveText(`https://publish.twitter.com/oembed?omit_script=true&dnt=true&url=${encodeURIComponent(`${TIBO_X_URL}/status/${id}`)}`, `X oEmbed ${id}`), id)]));
-  for (const [id, textOriginal] of oembedTexts) required.get(id).text_original = textOriginal;
-  for (const tweet of Array.isArray(feed.tweets) ? feed.tweets : []) {
+  for (const tweet of feedTweets) {
     const id = String(tweet?.id ?? "");
     const eligible = tweet?.is_reply !== true || String(tweet?.replying_to ?? "").toLowerCase() === "thsottiaux";
     if (!eligible || !/^\d+$/.test(id) || BigInt(id) < BigInt(visibleFloorId)) continue;
@@ -429,10 +460,11 @@ async function collectLiveSnapshot(statePath, collectionPath) {
       post_id: id,
       published_at_utc: iso(tweet.at ?? new Date(snowflakeTimestampMs(id)).toISOString(), `feed.tweets.${id}.at`),
       url: String(tweet.url ?? `${TIBO_X_URL}/status/${id}`),
-      text_original: prior?.text_original ?? String(tweet.text ?? ""),
       discovered_by: [...new Set([...(prior?.discovered_by ?? []), tweet.is_reply === true ? "feed_self_thread" : "feed_top_level"])],
     });
   }
+  const statusTexts = await Promise.all([...required.keys()].map(async (id) => [id, textFromXStatusHtml(await fetchLiveText(xStatusTransportUrl(id), `X 代理帖子 ${id}`), id)]));
+  for (const [id, textOriginal] of statusTexts) required.get(id).text_original = textOriginal;
   const requiredPosts = [...required.values()].sort((a, b) => BigInt(a.post_id) < BigInt(b.post_id) ? -1 : 1);
   const probePost = [...requiredPosts, floorPost].reduce((latest, post) => BigInt(post.post_id) > BigInt(latest.post_id) ? post : latest);
   const snapshot = {
@@ -441,9 +473,11 @@ async function collectLiveSnapshot(statePath, collectionPath) {
     state_path: path.resolve(statePath),
     state_source: usingSeed ? "bundled_seed" : "existing_output",
     state_probe_floor_post_id: String(floorPost.post_id),
-    latest_overall_post: required.get(xPostIds[0]),
+    latest_overall_post: required.get(xTopLevelPostIds[0]),
     probe_post: probePost,
     visible_x_post_ids: xPostIds,
+    visible_x_top_level_post_ids: xTopLevelPostIds,
+    x_transport_url: TIBO_X_TRANSPORT_URL,
     required_posts: requiredPosts,
     missing_from_state: requiredPosts.filter((post) => !existingIds.has(post.post_id)).map((post) => post.post_id),
     mismatched_in_state: collectionMismatches({ required_posts: requiredPosts }, existingPosts),
@@ -1986,7 +2020,13 @@ function selfTest() {
   const reread = JSON.parse(fs.readFileSync(target, "utf8"));
   validateOutput(reread);
   const state = compactExistingState(target);
-  if (!state.base_reusable || state.latest_overall_post_id !== output.current.latest_overall_post.post_id || state.confirmed_reset_count !== output.history.confirmed_reset_count) throw new Error("自检紧凑状态读取失败");
+  if (!state.base_reusable || state.display_allowed !== false || "forecast_summary" in state || state.latest_overall_post_id !== output.current.latest_overall_post.post_id || state.confirmed_reset_count !== output.history.confirmed_reset_count) throw new Error("自检紧凑状态读取失败或提前暴露概率");
+  const gateRequiredPosts = output.current.recent_tibo_posts.map((post) => ({ post_id: post.post_id, published_at_utc: post.published_at_utc, url: post.url, text_original: post.text_original }));
+  const gateSnapshot = { schema_version: 1, checked_at_utc: new Date().toISOString(), latest_overall_post: output.current.latest_overall_post, probe_post: maxRecentPostById(gateRequiredPosts), required_posts: gateRequiredPosts };
+  const gateResult = evaluateLiveSnapshot(gateSnapshot, target);
+  if (gateResult.action !== "reuse_existing" || gateResult.display_allowed !== true || !gateResult.forecast_summary?.horizons?.length) throw new Error("自检安全实时入口未在门禁通过后返回概率");
+  const gapResult = evaluateLiveSnapshot({ ...gateSnapshot, required_posts: [...gateRequiredPosts, { post_id: `${BigInt(gateSnapshot.probe_post.post_id) + 1n}`, published_at_utc: new Date().toISOString(), url: `${TIBO_X_URL}/status/${BigInt(gateSnapshot.probe_post.post_id) + 1n}`, text_original: "new" }] }, target);
+  if (gapResult.action !== "full_refresh" || gapResult.display_allowed !== false || "forecast_summary" in gapResult) throw new Error("自检安全实时入口在清单缺口时提前暴露概率");
   const deltaInput = syntheticInput();
   deltaInput.historical_events = [];
   deltaInput.historical_signals = [];
@@ -2076,6 +2116,14 @@ function smokeTest() {
   if (companionCompact.historical_events.length) throw new Error("快速自检未抑制同一帖子串的重复确认事件");
   const latestCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], latest: true }], sources: [] });
   if (latestCompact.current.recent_tibo_posts[0]?.is_latest_overall !== true) throw new Error("快速自检未保留顶部帖子串主帖标记");
+  const classifiedXIds = classifyVisibleXPostIds('/thsottiaux/status/2086800639120888014 /thsottiaux/status/2086972933566857393 /thsottiaux/status/2086874565909815403 /thsottiaux/status/2086972802457063486 /thsottiaux/status/2086353229894529148 /thsottiaux/status/2086874565909815403', [
+    { id: '2086972933566857393', is_reply: true, replying_to: 'thsottiaux' },
+    { id: '2086800639120888014', is_reply: true, replying_to: 'hqmank' },
+  ]);
+  if (classifiedXIds.eligible.join(',') !== '2086972933566857393,2086972802457063486,2086874565909815403,2086353229894529148' || classifiedXIds.topLevel.join(',') !== '2086972802457063486,2086874565909815403,2086353229894529148') throw new Error("快速自检未正确排序主帖、保留自身帖子串或排除普通回复");
+  const proxyText = textFromXStatusHtml('<title>Tibo on X: &quot;Long &amp; useful&quot; / X</title> unrelated __typename:"NoteTweet",text:"Other text" target __typename:"NoteTweet",text:"Long &amp; useful\\n\\ncomplete text"', 'proxy-test');
+  if (proxyText !== 'Long & useful\n\ncomplete text') throw new Error("快速自检未从 X 代理单帖页提取完整长帖正文");
+  if (comparableXText('Same post https://t.co/example') !== comparableXText('Same post') || comparableXText('Truncated… https://t.co/example') === comparableXText('Truncated complete text')) throw new Error("快速自检 X 正文比较规则失败");
   const collectionDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-reset-collection-"));
   const collectionPath = path.join(collectionDirectory, "live.json");
   const collectionInput = structuredClone(compactBase);
@@ -2199,12 +2247,61 @@ function compactExistingState(outputPath) {
     recent_post_count: Array.isArray(output.current?.recent_tibo_posts) ? output.current.recent_tibo_posts.length : 0,
     confirmed_reset_count: Array.isArray(output.history?.events) ? output.history.events.filter((event) => event.event_type === "confirmed_reset" && event.included_in_training).length : 0,
     historical_signal_count: Array.isArray(output.history?.signals) ? output.history.signals.length : 0,
-    forecast_summary: usingSeed ? null : {
-      headline: output.conclusion?.headline ?? null,
-      horizons: Array.isArray(output.forecast?.horizons) ? output.forecast.horizons.map((item) => ({ horizon_hours: item.horizon_hours, display_probability_percent: item.display_probability_percent })) : [],
-    },
+    display_allowed: false,
     base_reusable: Array.isArray(output.current?.recent_tibo_posts) && Array.isArray(output.history?.events) && Array.isArray(output.history?.signals) && Array.isArray(output.history?.contexts),
   };
+}
+
+function compactForecastSummary(output) {
+  return {
+    headline: output.conclusion?.headline ?? null,
+    horizons: Array.isArray(output.forecast?.horizons) ? output.forecast.horizons.map((item) => ({ horizon_hours: item.horizon_hours, display_probability_percent: item.display_probability_percent })) : [],
+  };
+}
+
+function evaluateLiveSnapshot(snapshot, statePath) {
+  const usingSeed = !fs.existsSync(statePath);
+  const existing = JSON.parse(usingSeed ? readBundledBaseline() : readUtf8NoBom(statePath));
+  const gaps = collectionGaps(snapshot, existing.current?.recent_tibo_posts);
+  const mismatches = collectionMismatches(snapshot, existing.current?.recent_tibo_posts);
+  if (gaps.length || mismatches.length) return {
+    status: "ok",
+    action: "full_refresh",
+    reason: gaps.length ? "collection_gap" : "collection_mismatch",
+    missing_post_ids: gaps,
+    mismatched_post_ids: mismatches,
+    display_allowed: false,
+    wrote_files: false,
+    ...snapshot,
+  };
+  const result = runRefreshProbe({
+    checked_at_utc: snapshot.checked_at_utc,
+    latest_overall_post: snapshot.probe_post,
+    sources: [{ name: "deterministic live gate", url: TIBO_X_URL, retrieved_at_utc: snapshot.checked_at_utc }],
+  }, statePath, statePath);
+  if (result.action !== "reuse_existing") return {
+    status: result.action === "full_refresh" ? "ok" : "blocked",
+    action: result.action === "full_refresh" ? "full_refresh" : "stop",
+    reason: result.reason,
+    display_allowed: false,
+    wrote_files: false,
+    ...snapshot,
+  };
+  return {
+    status: "ok",
+    ...result,
+    display_allowed: true,
+    forecast_summary: compactForecastSummary(existing),
+  };
+}
+
+async function startLiveGate(statePath, collectionPath) {
+  if (!statePath) return { status: "blocked", action: "stop", stage: "start_live", reason: "--start-live 必须同时提供 --state", display_allowed: false, wrote_files: false };
+  try {
+    return evaluateLiveSnapshot(await collectLiveSnapshot(statePath, collectionPath), statePath);
+  } catch (error) {
+    return { status: "blocked", action: "stop", stage: "collect_live", reason: error.message, display_allowed: false, wrote_files: false };
+  }
 }
 
 function readUtf8NoBom(filePath) {
@@ -2243,10 +2340,18 @@ function verifyArtifactBundle(outputPath) {
 }
 
 async function main() {
+  if (process.argv.length === 2) {
+    process.stdout.write(`${JSON.stringify(await startLiveGate(DEFAULT_STATE_PATH, DEFAULT_LIVE_COLLECTION_PATH))}\n`);
+    return;
+  }
   const args = parseArgs(process.argv.slice(2));
   if (args.help) return process.stdout.write(`${usage()}\n`);
   if (args.smokeTest) return smokeTest();
   if (args.selfTest) return selfTest();
+  if (args.startLive) {
+    process.stdout.write(`${JSON.stringify(await startLiveGate(args.state, args.startLive))}\n`);
+    return;
+  }
   if (args.collectLive) {
     const snapshot = await collectLiveSnapshot(args.state, args.collectLive);
     process.stdout.write(`${JSON.stringify(snapshot)}\n`);
@@ -2297,7 +2402,8 @@ async function main() {
   }
   if (!args.input && !args.inputOnce && !args.inputBase64 && !args.inputEnv) throw new Error("必须提供 --input、--input-once、--input-base64 或 --input-env");
   const inputText = args.inputOnce ? readInputOnce(args.inputOnce) : readInputText(args.input, args.inputBase64, args.inputEnv);
-  const rawInput = mergeBaseHistory(assertLiveAsOf(JSON.parse(inputText)), args.baseHistory);
+  const effectiveBaseHistory = args.baseHistory ?? (args.liveCollection && fs.existsSync(DEFAULT_STATE_PATH) ? DEFAULT_STATE_PATH : null);
+  const rawInput = mergeBaseHistory(assertLiveAsOf(JSON.parse(inputText)), effectiveBaseHistory);
   assertLiveCollectionComplete(rawInput, args.liveCollection);
   const output = runForecast(rawInput);
   if (output.status === "blocked") {
