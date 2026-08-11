@@ -167,6 +167,9 @@ function mergeByKey(baseItems, newItems, key) {
 
 function mergeRecentPosts(baseItems, newItems) {
   const merged = new Map(baseItems.filter(Boolean).map((item) => [String(item.post_id), item]));
+  if (newItems.some((item) => item?.is_latest_overall === true)) {
+    for (const [key, item] of merged) merged.set(key, { ...item, is_latest_overall: false });
+  }
   for (const item of newItems.filter(Boolean)) {
     const key = String(item.post_id ?? "");
     if (item.exclude === true) {
@@ -192,6 +195,7 @@ function expandCompactInput(rawInput) {
     ...(post.correction === true ? { correction: true } : {}),
     ...(post.exclude === true ? { exclude: true } : {}),
     ...(post.confirmed_event === false ? { confirmed_event: false } : {}),
+    ...(typeof post.latest === "boolean" ? { is_latest_overall: post.latest } : {}),
   }));
   const postsById = new Map(posts.map((post) => [post.post_id, post]));
   const completedResetEvents = posts.filter((post) => post.exclude !== true && post.confirmed_event !== false && post.post_type === "reset_signal" && post.signal_level === 4).map((post) => ({
@@ -298,6 +302,10 @@ function compareRecentPosts(a, b) {
   if (timeDifference) return timeDifference;
   if (/^\d+$/.test(a.post_id) && /^\d+$/.test(b.post_id)) return BigInt(b.post_id) > BigInt(a.post_id) ? 1 : BigInt(b.post_id) < BigInt(a.post_id) ? -1 : 0;
   return String(b.post_id).localeCompare(String(a.post_id));
+}
+
+function maxRecentPostById(posts) {
+  return (Array.isArray(posts) ? posts : []).filter((post) => /^\d+$/.test(String(post?.post_id ?? ""))).reduce((latest, post) => !latest || BigInt(post.post_id) > BigInt(latest.post_id) ? post : latest, null);
 }
 
 function localTimeParts(value, timeZone) {
@@ -467,7 +475,7 @@ function recentPostIntegrityReasons(current, requireCount = true) {
     if (!Number.isInteger(post.signal_level) || post.signal_level < 0 || post.signal_level > 4) reasons.push(`${label}信号等级必须为 0—4 的整数`);
     if (post.is_latest_overall) latestOverallFlags += 1;
     if (post.is_latest_reset_signal) latestResetFlags += 1;
-    if (index > 0 && compareRecentPosts(posts[index - 1], post) > 0) reasons.push("近期 Tibo 动态未按发布时间和帖子 ID 严格倒序排列");
+    if (index > 1 && compareRecentPosts(posts[index - 1], post) > 0) reasons.push("近期 Tibo 动态除顶部帖子串主帖外，未按发布时间和帖子 ID 严格倒序排列");
   });
   if (posts.length && (latestOverallFlags !== 1 || !posts[0]?.is_latest_overall)) reasons.push("近期 Tibo 动态必须且只能将首条标记为最新总体动态");
   const latestOverall = current?.latest_overall_post;
@@ -540,19 +548,22 @@ function normalizeInput(input) {
     occurred_at_utc: iso(context.occurred_at_utc, "context.occurred_at_utc"),
     source_url: String(context.source_url ?? ""),
   })).sort((a, b) => new Date(a.occurred_at_utc) - new Date(b.occurred_at_utc));
-  const recentPosts = (Array.isArray(input.current?.recent_tibo_posts) ? input.current.recent_tibo_posts : [])
+  const chronologicalPosts = (Array.isArray(input.current?.recent_tibo_posts) ? input.current.recent_tibo_posts : [])
     .map(normalizeRecentPost)
     .sort(compareRecentPosts)
     .slice(0, MAX_RECENT_POSTS);
   const submittedLatestOverall = normalizePost(input.current?.latest_overall_post);
   const submittedLatestReset = normalizePost(input.current?.latest_reset_signal);
-  const latestResetIndex = recentPosts.findIndex((post) => post.post_type === "reset_signal" || post.is_latest_reset_signal);
-  recentPosts.forEach((post, index) => {
-    post.is_latest_overall = index === 0;
-    post.is_latest_reset_signal = index === latestResetIndex;
+  const explicitLatestOverallIndex = chronologicalPosts.findIndex((post) => post.is_latest_overall);
+  const latestOverallPost = chronologicalPosts[explicitLatestOverallIndex >= 0 ? explicitLatestOverallIndex : 0];
+  const latestResetPost = chronologicalPosts.find((post) => post.post_type === "reset_signal" || post.is_latest_reset_signal);
+  const recentPosts = latestOverallPost && explicitLatestOverallIndex > 0 ? [latestOverallPost, ...chronologicalPosts.filter((post) => post.post_id !== latestOverallPost.post_id)] : chronologicalPosts;
+  recentPosts.forEach((post) => {
+    post.is_latest_overall = post.post_id === latestOverallPost?.post_id;
+    post.is_latest_reset_signal = post.post_id === latestResetPost?.post_id;
   });
-  const derivedLatestOverall = postFromRecent(recentPosts[0]);
-  const derivedLatestReset = postFromRecent(recentPosts[latestResetIndex]);
+  const derivedLatestOverall = postFromRecent(latestOverallPost);
+  const derivedLatestReset = postFromRecent(latestResetPost);
   const timelineConsistent = (!submittedLatestOverall || samePost(submittedLatestOverall, derivedLatestOverall)) && (!submittedLatestReset || samePost(submittedLatestReset, derivedLatestReset));
   const horizonReasoning = normalizeReasoningContext(input.reasoning_context, sources);
   return {
@@ -1619,11 +1630,12 @@ function runRefreshProbe(rawProbe, existingPath, outputPath) {
     return probeFailure("现有预测 JSON 无法解析");
   }
   const existingPost = existing?.current?.latest_overall_post;
+  const existingCursorPost = maxRecentPostById(existing?.current?.recent_tibo_posts) ?? existingPost;
   if (!usingSeed && (existing?.schema_version !== SCHEMA_VERSION || existing?.model?.version !== MODEL_VERSION)) return probeFailure("现有预测版本不兼容");
   if (!usingSeed && (existing?.status === "blocked" || !Array.isArray(existing?.forecast?.horizons) || !existing.forecast.horizons.length)) return probeFailure("现有预测结果不可复用");
   const existingTimelineReasons = recentPostIntegrityReasons(existing?.current);
   if (existingTimelineReasons.length) return probeFailure(`现有预测近期时间线校验失败：${existingTimelineReasons.join("；")}`);
-  if (!existingPost?.post_id || !/^\d+$/.test(String(existingPost.post_id)) || !existingPost?.published_at_utc) return probeFailure("现有预测缺少可比较的最新帖子");
+  if (!existingPost?.post_id || !existingCursorPost?.post_id || !/^\d+$/.test(String(existingCursorPost.post_id)) || !existingCursorPost?.published_at_utc) return probeFailure("现有预测缺少可比较的最新帖子或增量游标");
 
   let probe;
   try {
@@ -1637,9 +1649,9 @@ function runRefreshProbe(rawProbe, existingPath, outputPath) {
 
   const remotePost = probe.latestOverallPost;
   if (!remotePost?.post_id || !/^\d+$/.test(String(remotePost.post_id)) || !remotePost?.published_at_utc || !remotePost?.url) return { action: "retry_probe", reason: "远程来源没有返回精确帖子 ID、时间和 URL", wrote_files: false };
-  const existingId = String(existingPost.post_id);
+  const existingId = String(existingCursorPost.post_id);
   const remoteId = String(remotePost.post_id);
-  const existingAt = iso(existingPost.published_at_utc, "existing.latest_overall_post.published_at_utc");
+  const existingAt = iso(existingCursorPost.published_at_utc, "existing.probe_cursor_post.published_at_utc");
   const remoteAt = iso(remotePost.published_at_utc, "probe.latest_overall_post.published_at_utc");
   const remoteSnowflakeTime = snowflakeTimestampMs(remoteId);
   if (remoteSnowflakeTime == null || Math.abs(new Date(remoteAt).getTime() - remoteSnowflakeTime) > POST_TIME_TOLERANCE_MS || !String(remotePost.url).includes(`/status/${remoteId}`)) return { action: "retry_probe", reason: "远程最新帖子 ID、发布时间或 URL 绑定不一致", wrote_files: false };
@@ -1894,10 +1906,17 @@ function selfTest() {
 function smokeTest() {
   const valid = validateSnapshot(syntheticInput());
   if (valid.action !== "proceed") throw new Error(`快速自检预检失败：${valid.blocked_reasons.join("；")}`);
+  const threadedInput = syntheticInput();
+  threadedInput.current.recent_tibo_posts[0].is_latest_overall = false;
+  threadedInput.current.recent_tibo_posts[1].is_latest_overall = true;
+  delete threadedInput.current.latest_overall_post;
+  delete threadedInput.current.latest_reset_signal;
+  const threadedData = normalizeInput(threadedInput);
+  if (threadedData.current.latest_overall_post.post_id !== threadedInput.current.recent_tibo_posts[1].post_id || threadedData.current.recent_tibo_posts[0].post_id !== threadedInput.current.recent_tibo_posts[1].post_id || maxRecentPostById(threadedData.current.recent_tibo_posts).post_id !== threadedInput.current.recent_tibo_posts[0].post_id) throw new Error("快速自检未区分帖子串顶部主帖与最大增量游标");
   const compactBase = syntheticInput();
   const compact = {
     as_of_utc: compactBase.current.as_of_utc,
-    posts: compactBase.current.recent_tibo_posts.map((post) => ({ id: post.post_id, at: post.published_at_utc, url: post.url, text: post.text_original, zh: post.text_zh, type: post.post_type, level: post.signal_level, evidence: post.classification_evidence })),
+    posts: compactBase.current.recent_tibo_posts.map((post) => ({ id: post.post_id, at: post.published_at_utc, url: post.url, text: post.text_original, zh: post.text_zh, type: post.post_type, level: post.signal_level, evidence: post.classification_evidence, latest: post.is_latest_overall })),
     sources: compactBase.sources.map((source) => ({ id: source.source_id, name: source.name, url: source.url, group: source.independence_group, scopes: source.evidence_scopes, post_id: source.observed_post_id, ref: source.evidence_ref })),
     status_indicator: "operational",
   };
@@ -1907,6 +1926,8 @@ function smokeTest() {
   if (completedCompact.historical_events[0]?.event_id !== `reset-${compact.posts[0].id}`) throw new Error("快速自检未从已完成重置帖生成确认事件");
   const companionCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4, confirmed_event: false }], sources: [] });
   if (companionCompact.historical_events.length) throw new Error("快速自检未抑制同一帖子串的重复确认事件");
+  const latestCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], latest: true }], sources: [] });
+  if (latestCompact.current.recent_tibo_posts[0]?.is_latest_overall !== true) throw new Error("快速自检未保留顶部帖子串主帖标记");
   if (normalizeRecentPost({ post_id: "alias", published_at_utc: new Date().toISOString(), post_type: "general" }).post_type !== "other") throw new Error("快速自检未归一化 general 类型");
   const preservedPost = mergeRecentPosts([{ post_id: "same", text_original: "verified" }], [{ post_id: "same", text_original: "summary" }])[0];
   const correctedPost = mergeRecentPosts([{ post_id: "same", text_original: "old" }], [{ post_id: "same", text_original: "corrected", correction: true }])[0];
@@ -1992,6 +2013,8 @@ function hasUsableExistingForecast(outputPath) {
 function compactExistingState(outputPath) {
   const usingSeed = !fs.existsSync(outputPath);
   const output = JSON.parse(usingSeed ? readBundledBaseline() : readUtf8NoBom(outputPath));
+  const probeCursorPost = maxRecentPostById(output.current?.recent_tibo_posts) ?? output.current?.latest_overall_post;
+  const useProbeCursor = BigInt(probeCursorPost?.post_id ?? "0") > BigInt(KNOWN_LATEST_POST_FLOOR.post_id);
   return {
     output: path.resolve(outputPath),
     base_source: usingSeed ? "bundled_seed" : "existing_output",
@@ -2004,8 +2027,8 @@ function compactExistingState(outputPath) {
     status: usingSeed ? "baseline_only" : output.status ?? null,
     latest_overall_post_id: output.current?.latest_overall_post?.post_id ?? null,
     latest_overall_post_at_utc: output.current?.latest_overall_post?.published_at_utc ?? null,
-    probe_floor_post_id: BigInt(output.current?.latest_overall_post?.post_id ?? "0") > BigInt(KNOWN_LATEST_POST_FLOOR.post_id) ? output.current.latest_overall_post.post_id : KNOWN_LATEST_POST_FLOOR.post_id,
-    probe_floor_post_at_utc: BigInt(output.current?.latest_overall_post?.post_id ?? "0") > BigInt(KNOWN_LATEST_POST_FLOOR.post_id) ? output.current.latest_overall_post.published_at_utc : KNOWN_LATEST_POST_FLOOR.published_at_utc,
+    probe_floor_post_id: useProbeCursor ? probeCursorPost.post_id : KNOWN_LATEST_POST_FLOOR.post_id,
+    probe_floor_post_at_utc: useProbeCursor ? probeCursorPost.published_at_utc : KNOWN_LATEST_POST_FLOOR.published_at_utc,
     latest_reset_signal_id: output.current?.latest_reset_signal?.post_id ?? null,
     latest_reset_signal_at_utc: output.current?.latest_reset_signal?.published_at_utc ?? null,
     recent_post_count: Array.isArray(output.current?.recent_tibo_posts) ? output.current.recent_tibo_posts.length : 0,
