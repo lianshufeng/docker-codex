@@ -3,11 +3,7 @@ name: codex-reset-forecast
 description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置信号、重置概率或希望预测 Codex reset 时使用。默认先读取现有预测 JSON，再用内置实时清单审计 Tibo Posts 的 ID 与原文完整性；只有 ID、原文或状态变化时才重算，稳定历史默认由脚本本地复用。禁止绕过清单和 AI 自行修改概率。
 ---
 
-> 技能版本：3.19.0（5.4 固定入口）
-
-## 绝对终止规则（优先级最高）
-
-任何一次脚本返回 `status:"blocked"`、`action:"stop"`、`wrote_files:false` 且没有 `display_allowed:true`，或固定 `RUN` 命令未输出完整 Markdown 报告时，立即结束。最终回答只能逐字报告脚本的 `stage/reason/blocked_reasons` 和“未生成或保存预测文件”；禁止继续调用工具、修补输入、引用 tracker/站点概率、读取旧文件、给出大致概率或询问是否整理结果。第三方的 24h/48h 分数永远不是本技能预测；本技能只允许展示脚本成功输出或 `forecast_summary` 中的 `2/4/8/12/24/72h`。完整刷新只允许提交一次；若该次被脚本阻断，不得二次手工构造输入。
+> 技能版本：3.17.0（5.4 固定入口）
 
 ## 5.4 固定入口（必须先执行）
 
@@ -30,9 +26,7 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 1. `COLLECT`：只无参数运行固定脚本，建立确定性完整性清单和复用门禁；只有它返回 `action="full_refresh"` 才用远程实时能力补齐清单列出的正文、分类及其他来源。内置基座视为有效历史，除非用户明确要求重建历史。
 2. `RUN`：完整刷新禁止写输入文件。原样用带 TTY 的 `exec_command` 启动 `stty -echo 2>/dev/null || true; IFS= read -r CODEX_RESET_DELTA; stty echo 2>/dev/null || true; export CODEX_RESET_DELTA; node /home/node/.agents/skills/codex-reset-forecast/scripts/forecast.mjs --input-env CODEX_RESET_DELTA --live-collection /tmp/codex-reset-live.json --print-report`；脚本会自动复用固定状态文件中的历史。取得 session ID 后用 `write_stdin` 发送不超过 3000 UTF-8 字节的单行紧凑 JSON加换行。不要改写命令，不用管道、`printf`、heredoc、内联 JSON、base64 或 `apply_patch`。
 
-`sources[]` 必须固定提交四项，不得因已抓取但未用于 `latest_overall` 而省略：`x` 使用 canonical X URL、`group:"x_original"`、`scopes:["latest_overall"]` 并绑定顶部 ID；`tracker_org` 使用 `https://codexreset.org/`、`group:"search_engine"`、`scopes:["latest_overall"]` 并绑定顶部 ID；`tracker_com` 使用 `https://codex-reset.com/tibo`、`group:"codex_reset_tracker"`、`scopes:["latest_reset_signal"]`；`official` 使用 `https://status.openai.com/`、`group:"openai_official"`、`scopes:["official_status"]`。只有来源实际看到对应内容时才能声明 scope；任一固定来源缺失必须补抓后再提交，禁止直接结束完整刷新。
-
-紧凑 JSON 固定为 `{"as_of_utc":"UTC","posts":[{"id":"ID","at":"UTC","url":"X URL","text":"英文","zh":"中文","type":"TYPE","level":LEVEL,"evidence":"分类依据","confirmed_event":true,"latest":true}],"sources":[{"id":"x","url":"X URL","group":"x_original","scopes":["latest_overall"],"post_id":"顶部主帖ID"},{"id":"tracker_org","url":"https://codexreset.org/","group":"search_engine","scopes":["latest_overall"],"post_id":"顶部主帖ID"},{"id":"tracker_com","url":"https://codex-reset.com/tibo","group":"codex_reset_tracker","scopes":["latest_reset_signal"]},{"id":"official","url":"https://status.openai.com/","group":"openai_official","scopes":["official_status"]}],"status_indicator":"operational"}`。`posts[]` 必须补齐清单 `required_posts` 中缺失或原文不匹配的每个 ID，禁止只提交最大 ID；`text` 逐字使用清单原文，脚本还会在合并后再次用清单恢复 ID、时间、URL 与原文，缺一条即拒绝写结果。只有清单 `latest_overall_post` 填 `latest:true`；已误收的普通回复用 `{"id":"ID","exclude":true}` 删除。英文明确表示 `have been reset`、`I've reset`、`I have reset` 或同义的已完成 Codex 全局重置时，固定填 `type:"reset_signal",level:4`并给出 `zh` 和 `evidence`；同一重置帖子串只有信息最完整的一条填 `confirmed_event:true`，其他已完成表述填 `confirmed_event:false`，避免重复计数；脚本会确定性生成对应的确认重置事件。`as_of_utc` 必须原样使用清单的 `checked_at_utc`。只提交缺失/不匹配/新增/修正帖子；默认省略 reasoning 和三个历史数组。`latest_overall` 来源必须各自使用不同 URL；`fetched_at` 只有来源正文明确给出时才填。若确实超过 3000 字节，分多次 `write_stdin`，只在最后一段加换行。
+紧凑 JSON 固定为 `{"as_of_utc":"UTC","posts":[{"id":"ID","at":"UTC","url":"X URL","text":"英文","zh":"中文","type":"TYPE","level":LEVEL,"evidence":"分类依据","confirmed_event":true,"latest":true}],"sources":[{"id":"x","url":"来源URL","group":"x_original","scopes":["latest_overall"],"post_id":"顶部主帖ID"},{"id":"mirror","url":"独立来源URL","group":"search_engine","scopes":["latest_overall"],"post_id":"顶部主帖ID"},{"id":"official","url":"https://status.openai.com/","group":"openai_official","scopes":["official_status"]}],"status_indicator":"operational"}`。`posts[]` 必须补齐清单 `required_posts` 中缺失或原文不匹配的每个 ID，禁止只提交最大 ID；`text` 逐字使用清单原文，脚本还会在合并后再次用清单恢复 ID、时间、URL 与原文，缺一条即拒绝写结果。只有清单 `latest_overall_post` 填 `latest:true`；已误收的普通回复用 `{"id":"ID","exclude":true}` 删除。英文明确表示 `have been reset`、`I've reset`、`I have reset` 或同义的已完成 Codex 全局重置时，固定填 `type:"reset_signal",level:4`并给出 `zh` 和 `evidence`；同一重置帖子串只有信息最完整的一条填 `confirmed_event:true`，其他已完成表述填 `confirmed_event:false`，避免重复计数；脚本会确定性生成对应的确认重置事件。`as_of_utc` 必须原样使用清单的 `checked_at_utc`。只提交缺失/不匹配/新增/修正帖子；默认省略 reasoning 和三个历史数组。`latest_overall` 来源必须各自使用不同 URL；`fetched_at` 只有来源正文明确给出时才填。若确实超过 3000 字节，分多次 `write_stdin`，只在最后一段加换行。
 
 提交 JSON 前必须逐条按整篇语义分类，不能只看最后一句或只匹配 `reset` 关键词。先解析同一帖内的因果、转折、代词和回指，再使用以下固定等级：`0`=没有额度重置含义；`1`=只弱提及或含糊试探重置；`2`=明确表达重置方向/意愿，但没有承诺或时间；`3`=明确承诺未来重置，或“重置背景/未兑现承诺 + surprise/gift 等回指 + 明确未来时间”形成强烈且有时限的重置暗示；`4`=明确表示全局重置已经完成。等级 `1—4` 一律填 `type:"reset_signal"`、中文和具体分类依据；等级 `3` 可补 `intent:"explicit_commitment",explicit_timing:true`，等级 `2` 可补 `intent:"directional_reset"`，等级 `1` 可补 `intent:"weak_mention"`。原文含 `today`、`tonight` 或 `tomorrow` 时再原样填 `timing`；LLM 禁止手算 UTC，脚本按 `America/Los_Angeles` 的当地日期和夏令时解析承诺窗口，并以北京时间展示。否定、引用他人、讨论历史规则但没有当前意图时不得仅因出现 `reset` 升级。
 
@@ -50,7 +44,6 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 ## 硬门禁与输出
 
 - 只预测 Codex 全局善意额度重置；第三方概率不入模，AI 不得估计或修改脚本概率。
-- 已完成重置公告只能生成等级 `4` 结果事件，禁止同时作为等级 `1—3` 预测信号；脚本会剔除零延迟结果公告与重置事件附近的完成表述，防止结果泄漏。
 - 最新总体动态须由两个不同 `group` 的新鲜远程来源绑定同一 ID；OpenAI 官方状态须新鲜。过期辅助 Tracker 只降级，承担上述硬门禁的来源过期则阻断。
 - `latest_overall` 来源填 `post_id`；脚本用 `posts[]` 同 ID 自动绑定时间与 URL。来源 URL、分组和本次实际证据必须真实，`fetched_at` 不得伪造。
 - 有基座只提交新增/修正帖子；不传完整历史、逐时解释或概率。常见帖子类型由脚本归一化，预测相关新帖仍须 `zh` 和 `evidence`。
