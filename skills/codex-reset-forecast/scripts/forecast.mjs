@@ -18,9 +18,9 @@ const HORIZONS = [2, 4, 8, 12, 24, 72];
 const LAMBDAS = [0.01, 0.1, 1, 10, 100];
 const DECAYS = [12, 24, 48, 72];
 const DEFAULT_WORK_TIMEZONE = "America/Los_Angeles";
-const SIGNAL_PRIOR_STRENGTH = 1;
-const SCHEMA_VERSION = "1.12.0";
-const MODEL_VERSION = "3.2.0";
+const SIGNAL_PRIOR_STRENGTH = 4;
+const SCHEMA_VERSION = "1.13.0";
+const MODEL_VERSION = "3.3.0";
 const MIN_RECENT_POSTS = 10;
 const MAX_RECENT_POSTS = 30;
 const X_EPOCH_MS = 1_288_834_974_657n;
@@ -98,7 +98,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.17.0",
+    "Codex Reset Forecast 3.18.0",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
@@ -286,6 +286,15 @@ function urlHost(value) {
 function isOfficialOpenAIUrl(value) {
   const host = urlHost(value);
   return host === "openai.com" || host.endsWith(".openai.com");
+}
+
+function isRequiredTrackerUrl(value, host, pathPrefix = "/") {
+  try {
+    const url = new URL(value);
+    return new Set([host, `www.${host}`]).has(url.hostname.toLowerCase()) && url.pathname.toLowerCase().startsWith(pathPrefix);
+  } catch {
+    return false;
+  }
 }
 
 function sourceEffectiveRetrievedAt(source) {
@@ -751,7 +760,7 @@ function normalizeInput(input) {
     included_in_training: Boolean(event.included_in_training),
     exclusion_reason: event.exclusion_reason == null ? null : String(event.exclusion_reason),
   })).sort((a, b) => new Date(a.announced_at_utc) - new Date(b.announced_at_utc));
-  const signals = (Array.isArray(input.historical_signals) ? input.historical_signals : []).map((signal) => ({
+  const normalizedSignals = (Array.isArray(input.historical_signals) ? input.historical_signals : []).map((signal) => ({
     post_id: String(signal.post_id ?? ""),
     published_at_utc: iso(signal.published_at_utc, "signal.published_at_utc"),
     url: String(signal.url ?? ""),
@@ -774,6 +783,14 @@ function normalizeInput(input) {
     reset_within_24h: Boolean(signal.reset_within_24h),
     reset_within_72h: Boolean(signal.reset_within_72h),
   })).sort((a, b) => new Date(a.published_at_utc) - new Date(b.published_at_utc));
+  const confirmedEventTimes = events.filter((event) => event.event_type === "confirmed_reset" && event.included_in_training).map((event) => new Date(event.announced_at_utc).getTime());
+  const completedPattern = /\b(?:have|has|had|i(?:'ve| have)|we(?:'ve| have))\s+(?:now\s+)?reset|\busage limits?\s+(?:have|has)\s+been reset|\bit is done\b|\bi did it again\b|\banother reset for\b/i;
+  const signals = normalizedSignals.filter((signal) => {
+    if (signal.outcome_time_kind === "exact" && Number.isFinite(signal.latency_upper_hours) && signal.latency_upper_hours <= 0) return false;
+    const signalTime = new Date(signal.published_at_utc).getTime();
+    const nearConfirmedReset = confirmedEventTimes.some((eventTime) => Math.abs(eventTime - signalTime) <= 10 * 60_000);
+    return !(nearConfirmedReset && completedPattern.test(signal.text));
+  });
   const contexts = (Array.isArray(input.historical_contexts) ? input.historical_contexts : []).map((context) => ({
     context_id: String(context.context_id ?? ""),
     context_type: String(context.context_type ?? ""),
@@ -1063,7 +1080,10 @@ function signalLatencyWeight(ageHours, data, currentSignal) {
     const bandwidth = Math.max(3, (signal.latency_upper_hours - lower) / 2 + 2);
     density += signalSimilarity(signal, currentSignal) * Math.exp(-0.5 * ((ageHours - midpoint) / bandwidth) ** 2);
   }
-  return density;
+  if (!currentSignal.promised_window_end_at_utc) return density;
+  const candidateTime = new Date(currentSignal.published_at_utc).getTime() + ageHours * 3600_000;
+  const windowEnd = new Date(currentSignal.promised_window_end_at_utc).getTime();
+  return density * (candidateTime <= windowEnd ? 1.35 : 0.25);
 }
 
 function adjustedHourlyForecast(baseHourly, adjustedPoints, data, currentSignal, asOfMs) {
@@ -1449,6 +1469,8 @@ function validateRemoteGate(data) {
   }
   if (new Set(latestSources.map((source) => source.independence_group)).size < 2) reasons.push("最新总体动态必须由两个不同 independence_group 的新鲜来源核验");
   if (!validSources.some((source) => source.evidence_scopes.includes("official_status") && isOfficialOpenAIUrl(source.url))) reasons.push("缺少 OpenAI 官方域名的状态页或官方公告来源");
+  if (!validSources.some((source) => isRequiredTrackerUrl(source.url, "codexreset.org"))) reasons.push("缺少 codexreset.org 新鲜来源");
+  if (!validSources.some((source) => isRequiredTrackerUrl(source.url, "codex-reset.com", "/tibo"))) reasons.push("缺少 codex-reset.com/tibo 新鲜来源");
   if (!data.current.latest_overall_post) reasons.push("缺少 Tibo 最新总体动态");
   if (!data.current.latest_reset_signal) reasons.push("缺少最新重置相关动态");
   reasons.push(...recentPostIntegrityReasons(data.current));
@@ -2017,6 +2039,8 @@ function syntheticInput() {
     sources: [
       { source_id: "one", name: "Tibo X", url: recentPosts[0].url, retrieved_at_utc: asOf, source_reported_fetched_at_utc: null, independence_group: "x_original", evidence_scopes: ["latest_overall", "latest_reset_signal"], observed_post_id: recentPosts[0].post_id, observed_post_at_utc: recentPosts[0].published_at_utc, observed_post_url: recentPosts[0].url, retrieval_method: "chatgpt_remote_web_search", status: "ok", evidence_ref: "source:one" },
       { source_id: "two", name: "Remote search", url: recentPosts[0].url, retrieved_at_utc: asOf, source_reported_fetched_at_utc: null, independence_group: "search_engine", evidence_scopes: ["latest_overall"], observed_post_id: recentPosts[0].post_id, observed_post_at_utc: recentPosts[0].published_at_utc, observed_post_url: recentPosts[0].url, retrieval_method: "chatgpt_remote_web_search", status: "ok", evidence_ref: "source:two" },
+      { source_id: "tracker_org", name: "Codex Reset Monitor", url: "https://codexreset.org/", retrieved_at_utc: asOf, source_reported_fetched_at_utc: null, independence_group: "codex_reset_tracker", evidence_scopes: ["reset_history"], retrieval_method: "chatgpt_remote_web_search", status: "ok", evidence_ref: "source:tracker_org" },
+      { source_id: "tracker_com", name: "Tibo Radar", url: "https://codex-reset.com/tibo", retrieved_at_utc: asOf, source_reported_fetched_at_utc: null, independence_group: "codex_reset_tracker", evidence_scopes: ["latest_reset_signal"], retrieval_method: "chatgpt_remote_web_search", status: "ok", evidence_ref: "source:tracker_com" },
       { source_id: "official", name: "OpenAI status", url: "https://status.openai.com", retrieved_at_utc: asOf, source_reported_fetched_at_utc: null, independence_group: "openai_official", evidence_scopes: ["official_status"], retrieval_method: "chatgpt_remote_web_search", status: "ok", evidence_ref: "source:official" },
     ],
     reasoning_context: {
@@ -2239,6 +2263,12 @@ function smokeTest() {
   const noOfficialInput = syntheticInput();
   noOfficialInput.sources = noOfficialInput.sources.filter((source) => source.source_id !== "official");
   if (!validateSnapshot(noOfficialInput).blocked_reasons.some((reason) => reason.includes("OpenAI 官方域名"))) throw new Error("快速自检未阻止缺少官方状态来源");
+  const missingTrackerInput = syntheticInput();
+  missingTrackerInput.sources = missingTrackerInput.sources.filter((source) => source.source_id !== "tracker_com");
+  if (!validateSnapshot(missingTrackerInput).blocked_reasons.some((reason) => reason.includes("codex-reset.com/tibo"))) throw new Error("快速自检未阻止缺少指定 tracker 来源");
+  const leakageInput = syntheticInput();
+  leakageInput.historical_signals.push({ post_id: "result-leak", published_at_utc: leakageInput.historical_events[1].announced_at_utc, url: "https://example.com/result-leak", text: "Usage limits have been reset for all paid users.", signal_level: 3, intent_class: "directional_reset", outcome_time_kind: "exact", latency_lower_hours: 0, latency_upper_hours: 0, reset_at_utc: leakageInput.historical_events[1].announced_at_utc, matched_reset_event_id: leakageInput.historical_events[1].event_id, confidence: 1, classification_evidence: "已完成重置公告" });
+  if (normalizeInput(leakageInput).signals.some((signal) => signal.post_id === "result-leak")) throw new Error("快速自检未剔除零延迟结果公告泄漏");
   process.stdout.write("forecast smoke-test passed\n");
 }
 
