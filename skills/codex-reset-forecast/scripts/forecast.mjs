@@ -19,8 +19,8 @@ const LAMBDAS = [0.01, 0.1, 1, 10, 100];
 const DECAYS = [12, 24, 48, 72];
 const DEFAULT_WORK_TIMEZONE = "America/Los_Angeles";
 const SIGNAL_PRIOR_STRENGTH = 1;
-const SCHEMA_VERSION = "1.11.0";
-const MODEL_VERSION = "3.1.0";
+const SCHEMA_VERSION = "1.12.0";
+const MODEL_VERSION = "3.2.0";
 const MIN_RECENT_POSTS = 10;
 const MAX_RECENT_POSTS = 30;
 const X_EPOCH_MS = 1_288_834_974_657n;
@@ -36,6 +36,9 @@ const DEFAULT_STATE_PATH = "/workspace/codex-reset-forecast.json";
 const DEFAULT_LIVE_COLLECTION_PATH = "/tmp/codex-reset-live.json";
 const KNOWN_LATEST_POST_FLOOR = { post_id: "2086353229894529148", published_at_utc: "2026-08-09T07:25:47.232Z", url: "https://x.com/thsottiaux/status/2086353229894529148" };
 const COOLDOWN_HOUR_CANDIDATES = [6, 12, 24];
+const LOCAL_TIME_FORMATTERS = new Map();
+const LOCAL_TIME_PARTS_CACHE = new Map();
+const WORK_HOUR_PROFILE_CACHE = new WeakMap();
 const KNOWN_POST_TEXT_REPAIRS = new Map(Object.entries({
   "2084738022650892544": { text_zh: "我在 OpenAI 的职位是什么？", classification_evidence: "询问在 OpenAI 的职位，与重置信号无关" },
   "2084483765158719542": { text_zh: "从我最近看到的一些结果来看，Codex 显然是一个很好的执行框架。", classification_evidence: "评价 Codex 执行框架，与重置信号无关" },
@@ -55,8 +58,6 @@ const FEATURE_KEYS = [
   "decayed_tibo_signal",
   "recent_incident",
   "recent_release_or_milestone",
-  "utc_hour_sin",
-  "utc_hour_cos",
 ];
 
 function parseArgs(argv) {
@@ -97,7 +98,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.16.5",
+    "Codex Reset Forecast 3.17.0",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
@@ -203,6 +204,11 @@ function expandCompactInput(rawInput) {
     ...(post.zh ? { text_zh: String(post.zh), translation_method: "chatgpt" } : {}),
     post_type: String(post.type ?? "other"),
     signal_level: Number(post.level ?? 0),
+    ...(post.intent ? { intent_class: String(post.intent) } : {}),
+    ...(post.timing ? { timing_expression: String(post.timing) } : {}),
+    ...(typeof post.explicit_timing === "boolean" ? { has_explicit_timing: post.explicit_timing } : {}),
+    ...(post.window_end ? { promised_window_end_at_utc: post.window_end } : {}),
+    ...(Number.isFinite(post.confidence) ? { confidence: Number(post.confidence) } : {}),
     ...(post.evidence ? { classification_evidence: String(post.evidence) } : {}),
     ...(post.correction === true ? { correction: true } : {}),
     ...(post.exclude === true ? { exclude: true } : {}),
@@ -214,6 +220,17 @@ function expandCompactInput(rawInput) {
     event_id: `reset-${post.post_id}`, event_type: "confirmed_reset", announced_at_utc: post.published_at_utc,
     effective_at_utc: null, post_id: post.post_id, source_url: post.url, confidence: 1,
     reason_tags: ["tibo_announcement"], included_in_training: true, exclusion_reason: null,
+  }));
+  const currentSignals = posts.filter((post) => post.exclude !== true && post.post_type === "reset_signal" && post.signal_level >= 1 && post.signal_level <= 3).map((post) => ({
+    post_id: post.post_id, published_at_utc: post.published_at_utc, url: post.url, text: post.text_original,
+    signal_level: post.signal_level,
+    intent_class: post.intent_class ?? (post.signal_level >= 3 ? "explicit_commitment" : post.signal_level === 2 ? "directional_reset" : "weak_mention"),
+    has_explicit_timing: post.has_explicit_timing ?? /\b(?:today|tonight|tomorrow|hours?|days?|weekend|next week)\b/i.test(post.text_original),
+    promised_window_end_at_utc: post.promised_window_end_at_utc ?? relativeTimingWindowEnd(post.timing_expression, post.published_at_utc, rawInput.tibo_work_timezone ?? DEFAULT_WORK_TIMEZONE),
+    outcome_status: "not_observed", outcome_time_kind: "right_censored", reset_at_utc: null,
+    latency_lower_hours: null, latency_upper_hours: null, observation_end_at_utc: rawInput.as_of_utc,
+    confidence: post.confidence ?? 1, classification_evidence: post.classification_evidence,
+    matched_reset_event_id: null, hours_to_reset: null, reset_within_4h: false, reset_within_24h: false, reset_within_72h: false,
   }));
   return {
     current: { as_of_utc: rawInput.as_of_utc, cross_source_consistent: rawInput.cross_source_consistent !== false, tibo_work_timezone: rawInput.tibo_work_timezone ?? DEFAULT_WORK_TIMEZONE, recent_tibo_posts: posts },
@@ -229,7 +246,7 @@ function expandCompactInput(rawInput) {
       };
     }),
     refresh: { checked_at_utc: rawInput.as_of_utc, last_full_refresh_at_utc: rawInput.as_of_utc, status_indicator: rawInput.status_indicator ?? "unknown", active_incident_id: rawInput.active_incident_id ?? null },
-    reasoning_context: rawInput.reasoning_context ?? {}, historical_events: completedResetEvents, historical_signals: [], historical_contexts: [],
+    reasoning_context: rawInput.reasoning_context ?? {}, historical_events: completedResetEvents, historical_signals: currentSignals, historical_contexts: [],
   };
 }
 
@@ -491,11 +508,44 @@ async function collectLiveSnapshot(statePath, collectionPath) {
 }
 
 function localTimeParts(value, timeZone) {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  });
-  const parts = Object.fromEntries(formatter.formatToParts(new Date(value)).map((part) => [part.type, part.value]));
-  return { hour: Number(parts.hour), minute: Number(parts.minute), weekday: parts.weekday };
+  const timestamp = new Date(value).getTime();
+  const cacheKey = `${timeZone}:${timestamp}`;
+  const cached = LOCAL_TIME_PARTS_CACHE.get(cacheKey);
+  if (cached) return cached;
+  let formatter = LOCAL_TIME_FORMATTERS.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+    LOCAL_TIME_FORMATTERS.set(timeZone, formatter);
+  }
+  const parts = Object.fromEntries(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
+  const result = { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), hour: Number(parts.hour), minute: Number(parts.minute), weekday: parts.weekday };
+  LOCAL_TIME_PARTS_CACHE.set(cacheKey, result);
+  return result;
+}
+
+function zonedDateTimeToUtc(year, month, day, hour, minute, timeZone) {
+  const target = Date.UTC(year, month - 1, day, hour, minute);
+  let guess = target;
+  for (let index = 0; index < 3; index += 1) {
+    const parts = localTimeParts(guess, timeZone);
+    const observed = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    guess += target - observed;
+  }
+  return new Date(guess).toISOString();
+}
+
+function relativeTimingWindowEnd(expression, publishedAt, timeZone) {
+  const timing = String(expression ?? "").trim().toLowerCase();
+  if (!new Set(["today", "tonight", "tomorrow"]).has(timing)) return null;
+  const local = localTimeParts(publishedAt, timeZone);
+  const date = new Date(Date.UTC(local.year, local.month - 1, local.day + (timing === "tomorrow" ? 1 : 0)));
+  return zonedDateTimeToUtc(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), 23, 59, timeZone);
+}
+
+function workTimeText(value, timeZone) {
+  const parts = localTimeParts(value, timeZone);
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)} ${pad(parts.hour)}:${pad(parts.minute)} ${timeZone}`;
 }
 
 function sigmoid(value) {
@@ -846,15 +896,12 @@ function featureVector(timeMs, lastResetMs, data, decayHours, cooldownHours = 12
     const age = (timeMs - new Date(item.occurred_at_utc).getTime()) / 3600_000;
     return age >= 0 && age <= 72;
   });
-  const hour = new Date(timeMs).getUTCHours();
   return {
     log_hours_since_last_reset: Math.log1p(hoursSinceReset),
     post_reset_cooldown: Math.exp(-hoursSinceReset / cooldownHours),
     decayed_tibo_signal: signal ? signal.signal_level * Math.exp(-signalAge / decayHours) : 0,
     recent_incident: recentContexts.some((item) => item.context_type === "incident") ? 1 : 0,
     recent_release_or_milestone: recentContexts.some((item) => ["release", "milestone"].includes(item.context_type)) ? 1 : 0,
-    utc_hour_sin: Math.sin((2 * Math.PI * hour) / 24),
-    utc_hour_cos: Math.cos((2 * Math.PI * hour) / 24),
   };
 }
 
@@ -898,10 +945,12 @@ function cumulativeForecast(model, data, lastResetMs, asOfMs, maxHours = 72) {
   for (let hour = 1; hour <= maxHours; hour += 1) {
     const timeMs = asOfMs + hour * 3600_000;
     const features = featureVector(timeMs, lastResetMs, data, model.decayHours ?? 24, model.cooldownHours ?? 12);
-    const hazard = Math.min(0.999, Math.max(0.000001, predictHazard(model, features)));
+    const rawHazard = Math.min(0.999, Math.max(0.000001, predictHazard(model, features)));
+    const workMultiplier = workWindowMultiplier(timeMs, data);
+    const hazard = 1 - Math.pow(1 - rawHazard, workMultiplier);
     const before = survival;
     survival *= 1 - hazard;
-    hourly.push({ hour, timeMs, hazard, windowProbability: before * hazard });
+    hourly.push({ hour, timeMs, rawHazard, workMultiplier, hazard, windowProbability: before * hazard });
     if (HORIZONS.includes(hour)) points.push({ hour, timeMs, probability: 1 - survival });
   }
   return { points, hourly };
@@ -988,14 +1037,21 @@ function outcomeTimes(data) {
 function workWindowMultiplier(value, data) {
   const timeZone = data.current.tibo_work_timezone;
   const parts = localTimeParts(value, timeZone);
-  const workingPrior = parts.hour >= 8 && parts.hour < 19 ? 1.35 : 0.65;
-  const weekend = new Set(["Sat", "Sun"]).has(parts.weekday) ? 0.9 : 1;
-  const hours = outcomeTimes(data).map((item) => localTimeParts(item, timeZone).hour);
-  if (!hours.length) return workingPrior * weekend;
+  const isWeekday = !new Set(["Sat", "Sun"]).has(parts.weekday);
+  const isWorkHour = parts.hour >= 8 && parts.hour < 19;
+  const workingPrior = isWeekday ? (isWorkHour ? 1.35 : 0.55) : 0.3;
+  let profile = WORK_HOUR_PROFILE_CACHE.get(data);
+  if (!profile || profile.timeZone !== timeZone) {
+    const hours = outcomeTimes(data).map((item) => localTimeParts(item, timeZone).hour);
+    const reference = hours.length ? Array.from({ length: 24 }, (_, hour) => hours.reduce((sum, sample) => sum + Math.exp(-0.5 * (circularHourDistance(hour, sample) / 3) ** 2), 0) / hours.length).reduce((sum, item) => sum + item, 0) / 24 : null;
+    profile = { timeZone, hours, reference };
+    WORK_HOUR_PROFILE_CACHE.set(data, profile);
+  }
+  const { hours, reference } = profile;
+  if (!hours.length) return workingPrior;
   const density = hours.reduce((sum, hour) => sum + Math.exp(-0.5 * (circularHourDistance(parts.hour, hour) / 3) ** 2), 0) / hours.length;
-  const reference = Array.from({ length: 24 }, (_, hour) => hours.reduce((sum, sample) => sum + Math.exp(-0.5 * (circularHourDistance(hour, sample) / 3) ** 2), 0) / hours.length)
-    .reduce((sum, item) => sum + item, 0) / 24;
-  return weekend * (0.45 * workingPrior + 0.55 * Math.max(0.35, density / Math.max(reference, 1e-6)));
+  const historicalHourMultiplier = Math.max(0.35, density / Math.max(reference, 1e-6));
+  return 0.65 * workingPrior + 0.35 * historicalHourMultiplier;
 }
 
 function signalLatencyWeight(ageHours, data, currentSignal) {
@@ -1020,7 +1076,7 @@ function adjustedHourlyForecast(baseHourly, adjustedPoints, data, currentSignal,
     const segmentProbability = Math.max(0, point.probability - previousProbability);
     const weights = segment.map((item) => {
       const latency = (item.timeMs - signalStartMs) / 3600_000;
-      return Math.max(1e-9, (item.windowProbability + 0.0001) * workWindowMultiplier(item.timeMs, data) * signalLatencyWeight(latency, data, currentSignal));
+      return Math.max(1e-9, (item.windowProbability + 0.0001) * signalLatencyWeight(latency, data, currentSignal));
     });
     const totalWeight = weights.reduce((sum, value) => sum + value, 0);
     segment.forEach((item, index) => output.push({ ...item, windowProbability: segmentProbability * weights[index] / totalWeight }));
@@ -1037,7 +1093,7 @@ function worktimeHourlyForecast(baseHourly, points, data) {
   for (const point of points) {
     const segment = baseHourly.filter((item) => item.hour > previousHour && item.hour <= point.hour);
     const segmentProbability = Math.max(0, point.probability - previousProbability);
-    const weights = segment.map((item) => Math.max(1e-9, (item.windowProbability + 0.0001) * workWindowMultiplier(item.timeMs, data)));
+    const weights = segment.map((item) => Math.max(1e-9, item.windowProbability));
     const totalWeight = weights.reduce((sum, value) => sum + value, 0);
     segment.forEach((item, index) => output.push({ ...item, windowProbability: segmentProbability * weights[index] / totalWeight }));
     previousHour = point.hour;
@@ -1182,8 +1238,6 @@ function fixedCoefficients(model) {
     decayed_tibo_signal: null,
     recent_incident: null,
     recent_release_or_milestone: null,
-    utc_hour_sin: null,
-    utc_hour_cos: null,
   };
   if (!model) return result;
   model.featureKeys.forEach((key, index) => { result[key] = finiteOrNull(model.beta[index + 1]); });
@@ -1207,7 +1261,7 @@ function explanationFactors(model, features, data) {
   });
 }
 
-function likelyWindows(hourly) {
+function likelyWindows(hourly, data) {
   const candidates = [];
   for (let start = 0; start <= hourly.length - 4; start += 1) {
     const probability = hourly.slice(start, start + 4).reduce((sum, item) => sum + item.windowProbability, 0);
@@ -1222,6 +1276,13 @@ function likelyWindows(hourly) {
   return selected.map((item, index) => ({
     start_at_beijing: beijingIso(hourly[item.start].timeMs),
     end_at_beijing: beijingIso(hourly[item.start + 3].timeMs + 3600_000),
+    start_at_work_timezone: workTimeText(hourly[item.start].timeMs, data.current.tibo_work_timezone),
+    end_at_work_timezone: workTimeText(hourly[item.start + 3].timeMs + 3600_000, data.current.tibo_work_timezone),
+    work_window_status: (() => {
+      const parts = localTimeParts(hourly[item.start].timeMs, data.current.tibo_work_timezone);
+      if (new Set(["Sat", "Sun"]).has(parts.weekday)) return "weekend";
+      return parts.hour >= 8 && parts.hour < 19 ? "weekday_work_hours" : "weekday_off_hours";
+    })(),
     window_probability: Number(item.probability.toFixed(6)),
     rank: index + 1,
   }));
@@ -1509,7 +1570,7 @@ function runForecast(rawInput) {
   const adjustedHourly = currentSignal
     ? adjustedHourlyForecast(forecast.hourly, adjustedPoints, data, currentSignal, asOfMs)
     : worktimeHourlyForecast(forecast.hourly, adjustedPoints, data);
-  const windows = likelyWindows(adjustedHourly);
+  const windows = likelyWindows(adjustedHourly, data);
   const factors = explanationFactors(model, currentFeatures, data);
   if (!data.current.cross_source_consistent) factors.push({
     feature_key: "source_consistency",
@@ -1535,7 +1596,7 @@ function runForecast(rawInput) {
     direction: workMultiplier > 1.05 ? "increase" : workMultiplier < 0.95 ? "decrease" : "neutral",
     contribution_log_odds: Number(Math.log(Math.max(workMultiplier, 1e-6)).toFixed(6)),
     evidence_refs: data.sources.filter((source) => source.status === "ok").map((source) => source.evidence_ref),
-    explanation: `按 ${data.current.tibo_work_timezone} 的当地工作时段及历史重置小时分布，为候选小时重新分配概率。`,
+    explanation: `按 ${data.current.tibo_work_timezone} 的工作日、当地 08:00—19:00 工作时段及历史重置小时分布调整每小时风险，再重新累计预测概率。`,
   });
   return {
     schema_version: SCHEMA_VERSION,
@@ -2112,6 +2173,14 @@ function smokeTest() {
   if (compactValidation.action !== "proceed") throw new Error(`快速自检未接受紧凑当前证据格式：${compactValidation.blocked_reasons.join("；")}`);
   const completedCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4 }], sources: [] });
   if (completedCompact.historical_events[0]?.event_id !== `reset-${compact.posts[0].id}`) throw new Error("快速自检未从已完成重置帖生成确认事件");
+  const impliedCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], text: "I previously promised a reset for every 1M additional active users. We blew past that. Little surprise for you tomorrow.", type: "reset_signal", level: 3, timing: "tomorrow", evidence: "未兑现重置承诺与明日惊喜构成回指" }], sources: [] });
+  if (impliedCompact.historical_signals[0]?.intent_class !== "explicit_commitment" || impliedCompact.historical_signals[0]?.has_explicit_timing !== true || impliedCompact.historical_signals[0]?.outcome_time_kind !== "right_censored" || !impliedCompact.historical_signals[0]?.promised_window_end_at_utc) throw new Error("快速自检未把回指型明确信号及当地承诺窗口送入信号模型");
+  if (relativeTimingWindowEnd("tomorrow", "2026-08-12T21:20:00Z", DEFAULT_WORK_TIMEZONE) !== "2026-08-14T06:59:00.000Z" || relativeTimingWindowEnd("tomorrow", "2026-01-12T21:20:00Z", DEFAULT_WORK_TIMEZONE) !== "2026-01-14T07:59:00.000Z") throw new Error("快速自检未正确处理洛杉矶相对日期或夏令时");
+  const workData = { ...threadedData, current: { ...threadedData.current, tibo_work_timezone: DEFAULT_WORK_TIMEZONE } };
+  const flatModel = { beta: [-4], featureKeys: [], means: [], scales: [], decayHours: 24, cooldownHours: 12 };
+  const weekdayForecast = cumulativeForecast(flatModel, workData, Date.parse("2026-08-01T00:00:00Z"), Date.parse("2026-08-10T15:00:00Z"), 4);
+  const weekendForecast = cumulativeForecast(flatModel, workData, Date.parse("2026-08-01T00:00:00Z"), Date.parse("2026-08-15T15:00:00Z"), 4);
+  if (!(weekdayForecast.points[0].probability > weekendForecast.points[0].probability)) throw new Error("快速自检未让洛杉矶工作日窗口提高累计概率");
   const companionCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4, confirmed_event: false }], sources: [] });
   if (companionCompact.historical_events.length) throw new Error("快速自检未抑制同一帖子串的重复确认事件");
   const latestCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], latest: true }], sources: [] });

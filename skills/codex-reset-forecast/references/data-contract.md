@@ -16,7 +16,7 @@
 }
 ```
 
-正常增量优先使用紧凑格式：顶层 `as_of_utc`、`posts[]`、`sources[]`、`status_indicator`。帖子别名为 `id/at/url/text/type/level/zh/evidence/correction`；来源别名为 `id/name/url/group/scopes/post_id/fetched_at/status/ref`。正式生成必须同时提供 `--live-collection`，且 `posts[]` 与基座合并后必须覆盖清单的每个 `required_posts[].post_id`；清单可发现最大游标之前遗漏的中间帖子，并用 X 代理单帖页/feed 的 `text_original` 确定性修复摘要、截短或改写。脚本自动补齐远程方法、抓取时间和 `latest_overall` 的帖子绑定。`latest_overall` 来源必须提供 `post_id`，并绑定清单的 `latest_overall_post`；不同来源 URL 和分组必须真实独立。默认省略 reasoning 与历史数组。
+正常增量优先使用紧凑格式：顶层 `as_of_utc`、`posts[]`、`sources[]`、`status_indicator`。帖子别名为 `id/at/url/text/type/level/zh/evidence/correction/intent/timing/explicit_timing/window_end/confidence`；来源别名为 `id/name/url/group/scopes/post_id/fetched_at/status/ref`。正式生成必须同时提供 `--live-collection`，且 `posts[]` 与基座合并后必须覆盖清单的每个 `required_posts[].post_id`；清单可发现最大游标之前遗漏的中间帖子，并用 X 代理单帖页/feed 的 `text_original` 确定性修复摘要、截短或改写。脚本自动补齐远程方法、抓取时间和 `latest_overall` 的帖子绑定。`latest_overall` 来源必须提供 `post_id`，并绑定清单的 `latest_overall_post`；不同来源 URL 和分组必须真实独立。默认省略 reasoning 与历史数组。
 
 本文件只在快速门禁决定完整刷新后读取。`refresh` 包含 `checked_at_utc`、`last_full_refresh_at_utc`、`status_indicator` 和 `active_incident_id`。使用 `--base-history` 时，三个历史数组只提交新增或修正记录；无基座时再读取 [历史重建契约](history-rebuild.md)。
 

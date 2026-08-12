@@ -341,8 +341,6 @@
       decayed_tibo_signal: "Tibo 信号衰减",
       recent_incident: "近期服务事故",
       recent_release_or_milestone: "近期发布或里程碑",
-      utc_hour_sin: "UTC 时段周期（正弦）",
-      utc_hour_cos: "UTC 时段周期（余弦）",
       tibo_signal_latency_posterior: "Tibo 信号—重置延迟",
       tibo_work_window: "Tibo 当地工作时段"
     };
@@ -395,7 +393,9 @@
       if (!windows.length) { target.append(node("div", "empty", "暂无高概率窗口")); return; }
       windows.forEach((item) => {
         const row = node("div", "window");
-        row.append(node("div", "rank", `#${item.rank}`), node("div", "window-time", `${localTime(item.start_at_beijing)} — ${localTime(item.end_at_beijing)}`), node("div", "window-prob", percent(item.window_probability)));
+        const workTime = item.start_at_work_timezone && item.end_at_work_timezone ? `美国西部：${item.start_at_work_timezone} — ${item.end_at_work_timezone}` : "";
+        const status = { weekday_work_hours: "工作日工作时段", weekday_off_hours: "工作日非工作时段", weekend: "周末" }[item.work_window_status] || "";
+        row.append(node("div", "rank", `#${item.rank}`), node("div", "window-time", `${localTime(item.start_at_beijing)} — ${localTime(item.end_at_beijing)}${workTime ? `｜${workTime}${status ? `（${status}）` : ""}` : ""}`), node("div", "window-prob", percent(item.window_probability)));
         target.append(row);
       });
     }
