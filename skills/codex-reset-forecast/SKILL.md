@@ -3,9 +3,9 @@ name: codex-reset-forecast
 description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置信号、重置概率或希望预测 Codex reset 时使用。默认先读取现有预测 JSON，再用内置实时清单审计 Tibo Posts 的 ID 与原文完整性；只有 ID、原文或状态变化时才重算，稳定历史默认由脚本本地复用。禁止绕过清单和 AI 自行修改概率。
 ---
 
-> 技能版本：3.17.0（5.4 固定入口）
+> 技能版本：3.16.5（5.4-mini 固定入口）
 
-## 5.4 固定入口（必须先执行）
+## 5.4-mini 固定入口（必须先执行）
 
 用户只需直接调用本技能，无需提供或理解任何命令行参数。加载本 `SKILL.md` 不计入业务命令；加载后唯一首个业务命令必须是无参数运行 `node /home/node/.agents/skills/codex-reset-forecast/scripts/forecast.mjs`。脚本自行使用固定状态文件和临时清单路径，通过 `https://proxy.jpy.wang/x.com/thsottiaux` 读取 X `Posts` 最近至少 3 条主帖，通过同一代理的单帖页面提取完整原文，再用新鲜 feed 补充自身帖子串关系并完成复用门禁。禁止改写入口、拼接参数、探测路径、读取脚本或回读目标 JSON。
 
@@ -27,10 +27,6 @@ description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置�
 2. `RUN`：完整刷新禁止写输入文件。原样用带 TTY 的 `exec_command` 启动 `stty -echo 2>/dev/null || true; IFS= read -r CODEX_RESET_DELTA; stty echo 2>/dev/null || true; export CODEX_RESET_DELTA; node /home/node/.agents/skills/codex-reset-forecast/scripts/forecast.mjs --input-env CODEX_RESET_DELTA --live-collection /tmp/codex-reset-live.json --print-report`；脚本会自动复用固定状态文件中的历史。取得 session ID 后用 `write_stdin` 发送不超过 3000 UTF-8 字节的单行紧凑 JSON加换行。不要改写命令，不用管道、`printf`、heredoc、内联 JSON、base64 或 `apply_patch`。
 
 紧凑 JSON 固定为 `{"as_of_utc":"UTC","posts":[{"id":"ID","at":"UTC","url":"X URL","text":"英文","zh":"中文","type":"TYPE","level":LEVEL,"evidence":"分类依据","confirmed_event":true,"latest":true}],"sources":[{"id":"x","url":"来源URL","group":"x_original","scopes":["latest_overall"],"post_id":"顶部主帖ID"},{"id":"mirror","url":"独立来源URL","group":"search_engine","scopes":["latest_overall"],"post_id":"顶部主帖ID"},{"id":"official","url":"https://status.openai.com/","group":"openai_official","scopes":["official_status"]}],"status_indicator":"operational"}`。`posts[]` 必须补齐清单 `required_posts` 中缺失或原文不匹配的每个 ID，禁止只提交最大 ID；`text` 逐字使用清单原文，脚本还会在合并后再次用清单恢复 ID、时间、URL 与原文，缺一条即拒绝写结果。只有清单 `latest_overall_post` 填 `latest:true`；已误收的普通回复用 `{"id":"ID","exclude":true}` 删除。英文明确表示 `have been reset`、`I've reset`、`I have reset` 或同义的已完成 Codex 全局重置时，固定填 `type:"reset_signal",level:4`并给出 `zh` 和 `evidence`；同一重置帖子串只有信息最完整的一条填 `confirmed_event:true`，其他已完成表述填 `confirmed_event:false`，避免重复计数；脚本会确定性生成对应的确认重置事件。`as_of_utc` 必须原样使用清单的 `checked_at_utc`。只提交缺失/不匹配/新增/修正帖子；默认省略 reasoning 和三个历史数组。`latest_overall` 来源必须各自使用不同 URL；`fetched_at` 只有来源正文明确给出时才填。若确实超过 3000 字节，分多次 `write_stdin`，只在最后一段加换行。
-
-提交 JSON 前必须逐条按整篇语义分类，不能只看最后一句或只匹配 `reset` 关键词。先解析同一帖内的因果、转折、代词和回指，再使用以下固定等级：`0`=没有额度重置含义；`1`=只弱提及或含糊试探重置；`2`=明确表达重置方向/意愿，但没有承诺或时间；`3`=明确承诺未来重置，或“重置背景/未兑现承诺 + surprise/gift 等回指 + 明确未来时间”形成强烈且有时限的重置暗示；`4`=明确表示全局重置已经完成。等级 `1—4` 一律填 `type:"reset_signal"`、中文和具体分类依据；等级 `3` 可补 `intent:"explicit_commitment",explicit_timing:true`，等级 `2` 可补 `intent:"directional_reset"`，等级 `1` 可补 `intent:"weak_mention"`。原文含 `today`、`tonight` 或 `tomorrow` 时再原样填 `timing`；LLM 禁止手算 UTC，脚本按 `America/Los_Angeles` 的当地日期和夏令时解析承诺窗口，并以北京时间展示。否定、引用他人、讨论历史规则但没有当前意图时不得仅因出现 `reset` 升级。
-
-强制示例：`I previously promised a reset ... We blew past that ... Little surprise for you tomorrow.` 必须整体判为 `type:"reset_signal",level:3,intent:"explicit_commitment",explicit_timing:true,timing:"tomorrow"`；“tomorrow”修饰的 surprise 回指前文尚未兑现的 reset，不能判为普通动态。`I'm feeling like a limit reset ... see you in a few hours` 同为等级 `3`；`Usage limits have been reset` 为等级 `4`；`Don't say reset` 单独出现为等级 `0`。
 
 正常执行不调用 `--help`、`--smoke-test`、`--self-test`，不读取脚本，不回读完整 JSON。脚本返回 `blocked` 后不得自行生成概率。
 
