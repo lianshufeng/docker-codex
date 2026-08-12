@@ -98,7 +98,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.18.0",
+    "Codex Reset Forecast 3.19.0",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
@@ -196,14 +196,19 @@ function mergeRecentPosts(baseItems, newItems) {
 
 function expandCompactInput(rawInput) {
   if (rawInput?.current || !Array.isArray(rawInput?.posts) || !Array.isArray(rawInput?.sources)) return rawInput;
-  const posts = rawInput.posts.map((post) => ({
+  const posts = rawInput.posts.map((post) => {
+    const signalLevel = Math.min(4, Math.max(0, Number(post.level ?? 0)));
+    const rawType = String(post.type ?? "other");
+    const normalizedType = rawType === "confirmed_reset" ? "reset_signal" : new Set(["noise", "general", "status", "non_reset", "product", "product_update"]).has(rawType) ? "other" : rawType;
+    const postType = signalLevel > 0 ? "reset_signal" : new Set(["reset_signal", "codex", "limits", "release", "other"]).has(normalizedType) ? normalizedType : "other";
+    return ({
     post_id: String(post.id ?? ""),
     published_at_utc: post.at,
     url: String(post.url ?? ""),
     text_original: String(post.text ?? ""),
     ...(post.zh ? { text_zh: String(post.zh), translation_method: "chatgpt" } : {}),
-    post_type: String(post.type ?? "other"),
-    signal_level: Number(post.level ?? 0),
+    post_type: postType,
+    signal_level: signalLevel,
     ...(post.intent ? { intent_class: String(post.intent) } : {}),
     ...(post.timing ? { timing_expression: String(post.timing) } : {}),
     ...(typeof post.explicit_timing === "boolean" ? { has_explicit_timing: post.explicit_timing } : {}),
@@ -214,7 +219,8 @@ function expandCompactInput(rawInput) {
     ...(post.exclude === true ? { exclude: true } : {}),
     ...(post.confirmed_event === false ? { confirmed_event: false } : {}),
     ...(typeof post.latest === "boolean" ? { is_latest_overall: post.latest } : {}),
-  }));
+    });
+  });
   const postsById = new Map(posts.map((post) => [post.post_id, post]));
   const completedResetEvents = posts.filter((post) => post.exclude !== true && post.confirmed_event !== false && post.post_type === "reset_signal" && post.signal_level === 4).map((post) => ({
     event_id: `reset-${post.post_id}`, event_type: "confirmed_reset", announced_at_utc: post.published_at_utc,
@@ -247,6 +253,24 @@ function expandCompactInput(rawInput) {
     }),
     refresh: { checked_at_utc: rawInput.as_of_utc, last_full_refresh_at_utc: rawInput.as_of_utc, status_indicator: rawInput.status_indicator ?? "unknown", active_incident_id: rawInput.active_incident_id ?? null },
     reasoning_context: rawInput.reasoning_context ?? {}, historical_events: completedResetEvents, historical_signals: currentSignals, historical_contexts: [],
+  };
+}
+
+function terminalBlockedPayload(stage, reason, outputPath = null, preservedExisting = false) {
+  const message = String(reason || "未知错误");
+  return {
+    status: "blocked",
+    action: "stop",
+    terminal: true,
+    display_allowed: false,
+    stage,
+    reason: message,
+    output: outputPath,
+    wrote_files: false,
+    preserved_existing: preservedExisting,
+    blocked_reasons: [message],
+    allowed_response: "仅报告 stage、reason、blocked_reasons 和未生成或保存预测文件；禁止展示任何概率，禁止继续调用工具。",
+    forbidden_horizons: [48],
   };
 }
 
@@ -2197,6 +2221,11 @@ function smokeTest() {
   if (compactValidation.action !== "proceed") throw new Error(`快速自检未接受紧凑当前证据格式：${compactValidation.blocked_reasons.join("；")}`);
   const completedCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4 }], sources: [] });
   if (completedCompact.historical_events[0]?.event_id !== `reset-${compact.posts[0].id}`) throw new Error("快速自检未从已完成重置帖生成确认事件");
+  const legacyCompletedCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "confirmed_reset", level: 4 }], sources: [] });
+  const legacyProductCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "product_update", level: 0 }], sources: [] });
+  if (legacyCompletedCompact.current.recent_tibo_posts[0]?.post_type !== "reset_signal" || legacyProductCompact.current.recent_tibo_posts[0]?.post_type !== "other") throw new Error("快速自检未兼容服务器常见的旧分类类型");
+  const terminalPayload = terminalBlockedPayload("validation", "测试阻断");
+  if (terminalPayload.action !== "stop" || terminalPayload.display_allowed !== false || terminalPayload.wrote_files !== false || terminalPayload.blocked_reasons[0] !== "测试阻断") throw new Error("快速自检失败终止契约不完整");
   const impliedCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], text: "I previously promised a reset for every 1M additional active users. We blew past that. Little surprise for you tomorrow.", type: "reset_signal", level: 3, timing: "tomorrow", evidence: "未兑现重置承诺与明日惊喜构成回指" }], sources: [] });
   if (impliedCompact.historical_signals[0]?.intent_class !== "explicit_commitment" || impliedCompact.historical_signals[0]?.has_explicit_timing !== true || impliedCompact.historical_signals[0]?.outcome_time_kind !== "right_censored" || !impliedCompact.historical_signals[0]?.promised_window_end_at_utc) throw new Error("快速自检未把回指型明确信号及当地承诺窗口送入信号模型");
   if (relativeTimingWindowEnd("tomorrow", "2026-08-12T21:20:00Z", DEFAULT_WORK_TIMEZONE) !== "2026-08-14T06:59:00.000Z" || relativeTimingWindowEnd("tomorrow", "2026-01-12T21:20:00Z", DEFAULT_WORK_TIMEZONE) !== "2026-01-14T07:59:00.000Z") throw new Error("快速自检未正确处理洛杉矶相对日期或夏令时");
@@ -2506,7 +2535,8 @@ async function main() {
   assertLiveCollectionComplete(rawInput, args.liveCollection);
   const output = runForecast(rawInput);
   if (output.status === "blocked") {
-    process.stdout.write(`${JSON.stringify({ status: "blocked", output: args.output, wrote_files: false, preserved_existing: hasUsableExistingForecast(args.output), blocked_reasons: output.blocked_reasons })}\n`);
+    const reason = output.blocked_reasons.join("；") || "输入校验未通过";
+    process.stdout.write(`${JSON.stringify(terminalBlockedPayload("validation", reason, args.output, hasUsableExistingForecast(args.output)))}\n`);
     return;
   }
   writeAtomic(output, args.output);
@@ -2522,6 +2552,5 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error.stack ?? error.message}\n`);
-  process.exitCode = 1;
+  process.stdout.write(`${JSON.stringify(terminalBlockedPayload("exception", error.message))}\n`);
 });
