@@ -19,8 +19,11 @@ const LAMBDAS = [0.01, 0.1, 1, 10, 100];
 const DECAYS = [12, 24, 48, 72];
 const DEFAULT_WORK_TIMEZONE = "America/Los_Angeles";
 const SIGNAL_PRIOR_STRENGTH = 1;
-const SCHEMA_VERSION = "1.11.0";
+const SCHEMA_VERSION = "1.12.0";
 const MODEL_VERSION = "3.1.0";
+const CLASSIFICATION_VERSION = "2.0.0";
+const POST_TYPES = new Set(["reset_signal", "codex", "limits", "release", "other"]);
+const RESET_MEANING_LEVELS = new Map([["none", 0], ["weak", 1], ["directional", 2], ["explicit_future", 3], ["completed", 4]]);
 const MIN_RECENT_POSTS = 10;
 const MAX_RECENT_POSTS = 30;
 const X_EPOCH_MS = 1_288_834_974_657n;
@@ -39,11 +42,11 @@ const COOLDOWN_HOUR_CANDIDATES = [6, 12, 24];
 const KNOWN_POST_TEXT_REPAIRS = new Map(Object.entries({
   "2084738022650892544": { text_zh: "我在 OpenAI 的职位是什么？", classification_evidence: "询问在 OpenAI 的职位，与重置信号无关" },
   "2084483765158719542": { text_zh: "从我最近看到的一些结果来看，Codex 显然是一个很好的执行框架。", classification_evidence: "评价 Codex 执行框架，与重置信号无关" },
-  "2084196918071357707": { text_zh: "OpenAI 很神奇：你只要打开笔记本电脑，让 Codex 创建一个 PR，就能把改进发布给 10 亿用户。", classification_evidence: "描述产品开发体验，与重置信号无关" },
+  "2084196918071357707": { text_zh: "OpenAI 很神奇：你只要打开笔记本电脑，让 Codex 创建一个 PR，就能把改进发布给 10 亿用户。", signal_level: 0, reset_meaning: "none", classification_evidence: "描述产品开发体验，与重置信号无关" },
   "2083596911060324570": { text_zh: "基本上就是 ChatGPT 发布前一年的样子。当时叫 LMChat，后来又换了一个代号。DeepMind 当时被阻止发布产品。", classification_evidence: "回顾产品历史，与重置信号无关" },
   "2083395449814229287": { text_zh: "为了庆祝高效的一周，也让你这个周末运行 10 万个 Luna 线程……没错……等着瞧……我已经重置了 Codex 和 ChatGPT Work 的使用额度。尽情享受吧。", classification_evidence: "明确表示已重置 Codex 与 ChatGPT Work 的使用额度" },
   "2083024093037953322": { text_zh: "@brandon_galang 小模型也能大有作为。", classification_evidence: "评价小模型，与重置信号无关" },
-  "2082883636177916306": { text_zh: "我们一直忙于 GPT-5.6 Sol，它在很多任务上表现很好。此次更新包括：Luna 价格降低 80%、Terra 价格降低 20%、GPT-5.6 Sol 的 /fast 模式更快，以及应用内自动批准模式便宜约 10 倍。", classification_evidence: "产品发布与价格更新，不是重置信号" },
+  "2082883636177916306": { text_zh: "我们一直忙于 GPT-5.6 Sol，它在很多任务上表现很好。此次更新包括：Luna 价格降低 80%、Terra 价格降低 20%、GPT-5.6 Sol 的 /fast 模式更快，以及应用内自动批准模式便宜约 10 倍。", signal_level: 0, reset_meaning: "none", classification_evidence: "产品发布与价格更新，不是重置信号" },
   "2082317452755751098": { text_zh: "Sol 的用户们，大家好！我已经为所有 ChatGPT Work 和 Codex 用户重置了使用额度。同时简单更新一下 GPT-5.6 Sol 的额度情况：过去几周，很多人反馈 Sol 消耗 Codex 额度的速度比预期更快。", classification_evidence: "明确表示已为所有 ChatGPT Work 和 Codex 用户重置额度" },
   "2081940052154933696": { text_zh: "我回到电脑前了。所有 Codex 和 ChatGPT Work 付费用户的使用额度都已重置。太棒了，今天真不错！", classification_evidence: "明确表示已为所有 Codex 和 ChatGPT Work 付费用户重置额度" },
   "2081899343091843463": { text_original: "We're celebrating the fast adoption of ChatGPT Work and all the incredible effort that went into it today. I'm feeling like a limit reset. Hold on tight to your ultra and /fast and see you in a few hours when I'm back at the laptop!", text_zh: "我们正在庆祝 ChatGPT Work 的快速普及，以及今天为此付出的所有努力。我感觉该重置额度了。请留意你的 ultra 和 /fast，几小时后我回到电脑前再见！", classification_evidence: "明确表达将在几小时后进行额度重置" },
@@ -97,7 +100,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.16.5",
+    "Codex Reset Forecast 3.17.0",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
@@ -193,8 +196,45 @@ function mergeRecentPosts(baseItems, newItems) {
   return [...merged.values()];
 }
 
+function inferredResetMeaning(post) {
+  const level = Number(post?.signal_level ?? 0);
+  if (post?.post_type !== "reset_signal") return "none";
+  return [...RESET_MEANING_LEVELS].find(([, expectedLevel]) => expectedLevel === level)?.[0] ?? "none";
+}
+
+function hasExplicitCompletedResetMeaning(text) {
+  const value = String(text).replace(/[’]/g, "'").replace(/\s+/g, " ");
+  return [
+    /\b(?:i|we)(?:'ve| have)\s+(?:just\s+|now\s+)?reset\b/i,
+    /\b(?:usage\s+)?limits?\s+(?:have|has)\s+been\s+reset\b/i,
+    /\b(?:usage\s+)?limits?\s+(?:were|are)\s+(?:now\s+)?reset\b/i,
+    /\breset\s+(?:is|has been)\s+(?:done|complete|completed)\b/i,
+    /\bresets?\s+(?:are|is)\s+(?:now\s+)?(?:live|done|complete|completed)\b/i,
+  ].some((pattern) => pattern.test(value));
+}
+
+function assertCompactPostClassifications(rawInput) {
+  if (rawInput?.classification_version !== CLASSIFICATION_VERSION) throw new Error(`classification_version 必须为 ${CLASSIFICATION_VERSION}，旧分类不得复用`);
+  rawInput.posts.forEach((post, index) => {
+    if (post?.exclude === true) return;
+    const label = `posts[${index}]${post?.id ? `(${post.id})` : ""}`;
+    const type = String(post?.type ?? "");
+    const meaning = String(post?.reset_meaning ?? "");
+    const level = Number(post?.level);
+    if (!POST_TYPES.has(type)) throw new Error(`${label}.type 无效，只能使用 reset_signal、codex、limits、release、other`);
+    if (!RESET_MEANING_LEVELS.has(meaning)) throw new Error(`${label}.reset_meaning 无效，只能使用 none、weak、directional、explicit_future、completed`);
+    if (!Number.isInteger(level) || level !== RESET_MEANING_LEVELS.get(meaning)) throw new Error(`${label}.level 与 reset_meaning 不一致`);
+    if (meaning === "none" ? type === "reset_signal" : type !== "reset_signal") throw new Error(`${label}.type 与 reset_meaning 不一致`);
+    if (typeof post?.confirmed_event !== "boolean") throw new Error(`${label}.confirmed_event 必须显式填写布尔值`);
+    if (post.confirmed_event && meaning !== "completed") throw new Error(`${label} 只有 completed/Lv.4 可设置 confirmed_event:true`);
+    if (!String(post?.zh ?? "").trim() || !String(post?.evidence ?? "").trim()) throw new Error(`${label} 缺少 LLM 中文翻译或逐条语义分类依据`);
+    if (meaning === "completed" && !hasExplicitCompletedResetMeaning(post?.text)) throw new Error(`${label} 原文没有明确的已完成重置语义，禁止标为 completed/Lv.4`);
+  });
+}
+
 function expandCompactInput(rawInput) {
   if (rawInput?.current || !Array.isArray(rawInput?.posts) || !Array.isArray(rawInput?.sources)) return rawInput;
+  assertCompactPostClassifications(rawInput);
   const posts = rawInput.posts.map((post) => ({
     post_id: String(post.id ?? ""),
     published_at_utc: post.at,
@@ -203,19 +243,44 @@ function expandCompactInput(rawInput) {
     ...(post.zh ? { text_zh: String(post.zh), translation_method: "chatgpt" } : {}),
     post_type: String(post.type ?? "other"),
     signal_level: Number(post.level ?? 0),
+    reset_meaning: String(post.reset_meaning ?? "none"),
     ...(post.evidence ? { classification_evidence: String(post.evidence) } : {}),
     ...(post.correction === true ? { correction: true } : {}),
     ...(post.exclude === true ? { exclude: true } : {}),
-    ...(post.confirmed_event === false ? { confirmed_event: false } : {}),
+    confirmed_event: post.confirmed_event === true,
     ...(typeof post.latest === "boolean" ? { is_latest_overall: post.latest } : {}),
   }));
   const postsById = new Map(posts.map((post) => [post.post_id, post]));
-  const completedResetEvents = posts.filter((post) => post.exclude !== true && post.confirmed_event !== false && post.post_type === "reset_signal" && post.signal_level === 4).map((post) => ({
+  const completedResetEvents = posts.filter((post) => post.exclude !== true && post.confirmed_event === true && post.reset_meaning === "completed" && post.post_type === "reset_signal" && post.signal_level === 4).map((post) => ({
     event_id: `reset-${post.post_id}`, event_type: "confirmed_reset", announced_at_utc: post.published_at_utc,
     effective_at_utc: null, post_id: post.post_id, source_url: post.url, confidence: 1,
     reason_tags: ["tibo_announcement"], included_in_training: true, exclusion_reason: null,
   }));
+  const currentSignals = posts.filter((post) => post.exclude !== true && post.post_type === "reset_signal" && post.signal_level > 0 && post.signal_level < 4).map((post) => ({
+    post_id: post.post_id,
+    published_at_utc: post.published_at_utc,
+    url: post.url,
+    text: post.text_original,
+    signal_level: post.signal_level,
+    intent_class: post.reset_meaning === "explicit_future" ? "explicit_commitment" : post.reset_meaning === "directional" ? "directional_reset" : "weak_mention",
+    has_explicit_timing: post.reset_meaning === "explicit_future",
+    promised_window_end_at_utc: null,
+    outcome_status: "not_observed",
+    outcome_time_kind: "right_censored",
+    reset_at_utc: null,
+    latency_lower_hours: null,
+    latency_upper_hours: null,
+    observation_end_at_utc: rawInput.as_of_utc,
+    confidence: 1,
+    classification_evidence: post.classification_evidence,
+    matched_reset_event_id: null,
+    hours_to_reset: null,
+    reset_within_4h: false,
+    reset_within_24h: false,
+    reset_within_72h: false,
+  }));
   return {
+    classification_version: rawInput.classification_version,
     current: { as_of_utc: rawInput.as_of_utc, cross_source_consistent: rawInput.cross_source_consistent !== false, tibo_work_timezone: rawInput.tibo_work_timezone ?? DEFAULT_WORK_TIMEZONE, recent_tibo_posts: posts },
     sources: rawInput.sources.map((source) => {
       const scopes = Array.isArray(source.scopes) ? source.scopes.map(String) : [];
@@ -229,7 +294,7 @@ function expandCompactInput(rawInput) {
       };
     }),
     refresh: { checked_at_utc: rawInput.as_of_utc, last_full_refresh_at_utc: rawInput.as_of_utc, status_indicator: rawInput.status_indicator ?? "unknown", active_incident_id: rawInput.active_incident_id ?? null },
-    reasoning_context: rawInput.reasoning_context ?? {}, historical_events: completedResetEvents, historical_signals: [], historical_contexts: [],
+    reasoning_context: rawInput.reasoning_context ?? {}, historical_events: completedResetEvents, historical_signals: currentSignals, historical_contexts: [],
   };
 }
 
@@ -596,6 +661,7 @@ function normalizeRecentPost(post) {
   const rawPostType = String(post?.post_type ?? "other");
   const postType = rawPostType === "confirmed_reset" ? "reset_signal" : new Set(["noise", "general", "status", "non_reset"]).has(rawPostType) ? "other" : rawPostType;
   const signalLevel = Math.min(4, Math.max(0, Number(post?.signal_level ?? 0)));
+  const resetMeaning = String(post?.reset_meaning ?? inferredResetMeaning({ post_type: postType, signal_level: signalLevel }));
   const textZh = String(post?.text_zh ?? "");
   const classificationEvidence = String(post?.classification_evidence ?? "");
   const predictionRelevant = postType === "reset_signal" || signalLevel >= 2;
@@ -608,6 +674,7 @@ function normalizeRecentPost(post) {
     translation_method: textZh ? String(post?.translation_method ?? "chatgpt") : predictionRelevant ? "chatgpt" : "script_fallback",
     post_type: postType,
     signal_level: signalLevel,
+    reset_meaning: resetMeaning,
     classification_evidence: classificationEvidence || (predictionRelevant ? "" : `脚本回退：${postType}，signal_level=${signalLevel}`),
     is_latest_overall: Boolean(post?.is_latest_overall),
     is_latest_reset_signal: Boolean(post?.is_latest_reset_signal),
@@ -655,6 +722,10 @@ function recentPostIntegrityReasons(current, requireCount = true) {
     if (predictionRelevant && (!String(post.text_zh ?? "").trim() || post.translation_method !== "chatgpt")) reasons.push(`${label}属于预测相关动态但缺少中文翻译或 ChatGPT 翻译标记`);
     if (predictionRelevant && !String(post.classification_evidence ?? "").trim()) reasons.push(`${label}属于预测相关动态但缺少分类依据`);
     if (!Number.isInteger(post.signal_level) || post.signal_level < 0 || post.signal_level > 4) reasons.push(`${label}信号等级必须为 0—4 的整数`);
+    if (!POST_TYPES.has(post.post_type)) reasons.push(`${label}类型无效`);
+    if (!RESET_MEANING_LEVELS.has(post.reset_meaning) || RESET_MEANING_LEVELS.get(post.reset_meaning) !== post.signal_level) reasons.push(`${label}重置语义与信号等级不一致`);
+    if (post.reset_meaning === "none" ? post.post_type === "reset_signal" : post.post_type !== "reset_signal") reasons.push(`${label}重置语义与帖子类型不一致`);
+    if (post.reset_meaning === "completed" && !hasExplicitCompletedResetMeaning(post.text_original)) reasons.push(`${label}缺少明确的已完成重置语义，不能标为 Lv.4`);
     if (post.is_latest_overall) latestOverallFlags += 1;
     if (post.is_latest_reset_signal) latestResetFlags += 1;
     if (index > 1 && compareRecentPosts(posts[index - 1], post) > 0) reasons.push("近期 Tibo 动态除顶部帖子串主帖外，未按发布时间和帖子 ID 严格倒序排列");
@@ -687,6 +758,7 @@ function normalizeHorizonReasoning(item) {
 
 function normalizeInput(input) {
   if (!input || typeof input !== "object") throw new Error("输入必须是 JSON 对象");
+  if (input.classification_version !== CLASSIFICATION_VERSION) throw new Error(`classification_version 必须为 ${CLASSIFICATION_VERSION}`);
   const asOf = iso(input.current?.as_of_utc, "current.as_of_utc");
   const sources = Array.isArray(input.sources) ? input.sources.map((source, index) => normalizeSource(source, asOf, `sources[${index}]`)) : [];
   const events = (Array.isArray(input.historical_events) ? input.historical_events : []).map((event) => ({
@@ -786,6 +858,7 @@ function confirmedEvents(data) {
 function refreshFingerprintPayload({ latestOverallPost, latestResetSignal, lastResetEventId, lastResetAt, statusIndicator, activeIncidentId }) {
   return {
     schema_version: SCHEMA_VERSION,
+    classification_version: CLASSIFICATION_VERSION,
     model_version: MODEL_VERSION,
     latest_overall_post_id: latestOverallPost?.post_id ?? null,
     latest_overall_post_at_utc: latestOverallPost?.published_at_utc ?? null,
@@ -1321,6 +1394,7 @@ function buildBlockedOutput(input, reasons) {
   const signals = input?.signals ?? [];
   return {
     schema_version: SCHEMA_VERSION,
+    classification_version: CLASSIFICATION_VERSION,
     file_name: OUTPUT_NAME,
     site: { file_name: HTML_NAME, data_path: `./${OUTPUT_NAME}`, local_launcher: `./${LOCAL_LAUNCHER_NAME}`, local_server: `./${LOCAL_SERVER_NAME}`, language: "zh-CN", max_horizon_hours: 72, direct_file_supported: false, access_modes: ["local_http", "http", "https"], data_loading_priority: ["current_page_directory_json", "http_cache_bust"] },
     generated_at_utc: asOf,
@@ -1539,6 +1613,7 @@ function runForecast(rawInput) {
   });
   return {
     schema_version: SCHEMA_VERSION,
+    classification_version: CLASSIFICATION_VERSION,
     file_name: OUTPUT_NAME,
     site: { file_name: HTML_NAME, data_path: `./${OUTPUT_NAME}`, local_launcher: `./${LOCAL_LAUNCHER_NAME}`, local_server: `./${LOCAL_SERVER_NAME}`, language: "zh-CN", max_horizon_hours: 72, direct_file_supported: false, access_modes: ["local_http", "http", "https"], data_loading_priority: ["current_page_directory_json", "http_cache_bust"] },
     generated_at_utc: data.asOf,
@@ -1629,9 +1704,10 @@ function runForecast(rawInput) {
 
 function validateOutput(output) {
   if (hasEncodingCorruption(output)) throw new Error("输出包含连续问号、Unicode 替换符或私用区字符，疑似乱码");
-  const requiredTop = ["schema_version", "file_name", "site", "generated_at_utc", "generated_at_beijing", "status", "blocked_reasons", "refresh", "sources", "current", "history", "model", "forecast", "conclusion", "explanation"];
+  const requiredTop = ["schema_version", "classification_version", "file_name", "site", "generated_at_utc", "generated_at_beijing", "status", "blocked_reasons", "refresh", "sources", "current", "history", "model", "forecast", "conclusion", "explanation"];
   for (const key of requiredTop) if (!(key in output)) throw new Error(`输出缺少固定 key：${key}`);
   if (output.schema_version !== SCHEMA_VERSION) throw new Error("输出 schema_version 不兼容");
+  if (output.classification_version !== CLASSIFICATION_VERSION) throw new Error("输出 classification_version 不兼容");
   if (output.file_name !== OUTPUT_NAME) throw new Error("输出文件名契约不一致");
   if (output.site?.file_name !== HTML_NAME || output.site?.data_path !== `./${OUTPUT_NAME}` || output.site?.local_launcher !== `./${LOCAL_LAUNCHER_NAME}` || output.site?.local_server !== `./${LOCAL_SERVER_NAME}` || output.site?.max_horizon_hours !== 72 || output.site?.direct_file_supported !== false || JSON.stringify(output.site?.access_modes) !== JSON.stringify(["local_http", "http", "https"]) || JSON.stringify(output.site?.data_loading_priority) !== JSON.stringify(["current_page_directory_json", "http_cache_bust"])) throw new Error("静态网站契约不一致");
   if (!new Set(["ok", "degraded", "blocked"]).has(output.status)) throw new Error("status 枚举无效");
@@ -1653,13 +1729,14 @@ function validateOutput(output) {
   if (!Array.isArray(output.current.recent_tibo_posts)) throw new Error("近期 Tibo 动态结构无效");
   if (typeof output.current.cross_source_consistent !== "boolean") throw new Error("来源一致性字段无效");
   if (output.status !== "blocked" && (output.current.recent_tibo_posts.length < MIN_RECENT_POSTS || output.current.recent_tibo_posts.length > MAX_RECENT_POSTS)) throw new Error(`近期 Tibo 动态数量必须为 ${MIN_RECENT_POSTS}—${MAX_RECENT_POSTS} 条`);
-  const recentPostKeys = ["post_id", "published_at_utc", "url", "text_original", "text_zh", "translation_method", "post_type", "signal_level", "classification_evidence", "is_latest_overall", "is_latest_reset_signal"];
+  const recentPostKeys = ["post_id", "published_at_utc", "url", "text_original", "text_zh", "translation_method", "post_type", "signal_level", "reset_meaning", "classification_evidence", "is_latest_overall", "is_latest_reset_signal"];
   for (const post of output.current.recent_tibo_posts) {
     if (JSON.stringify(Object.keys(post)) !== JSON.stringify(recentPostKeys)) throw new Error("近期 Tibo 动态固定 key 不一致");
     const predictionRelevant = post.post_type === "reset_signal" || post.signal_level >= 2;
     if (!post.text_original || !post.text_zh || (predictionRelevant ? post.translation_method !== "chatgpt" : !new Set(["chatgpt", "script_fallback"]).has(post.translation_method))) throw new Error("近期 Tibo 动态双语内容不完整");
     if (!new Set(["reset_signal", "codex", "limits", "release", "other"]).has(post.post_type)) throw new Error("近期 Tibo 动态类型无效");
     if (post.signal_level < 0 || post.signal_level > 4) throw new Error("近期 Tibo 动态等级必须为 0—4");
+    if (!RESET_MEANING_LEVELS.has(post.reset_meaning) || RESET_MEANING_LEVELS.get(post.reset_meaning) !== post.signal_level) throw new Error("近期 Tibo 动态重置语义与等级不一致");
   }
   const latestResetPost = output.current.recent_tibo_posts.find((post) => post.is_latest_reset_signal);
   if (latestResetPost && output.current.latest_reset_signal && latestResetPost.post_id === output.current.latest_reset_signal.post_id && latestResetPost.signal_level !== output.current.latest_reset_signal.signal_level) throw new Error("最新重置相关动态等级在当前对象和近期列表中不一致");
@@ -1726,6 +1803,7 @@ function migrateDisplayContract(output) {
   return {
     ...output,
     schema_version: SCHEMA_VERSION,
+    classification_version: CLASSIFICATION_VERSION,
     sources: (output.sources ?? []).map((source, index) => normalizeSource({
       ...source,
       source_reported_fetched_at_utc: source.source_reported_fetched_at_utc ?? null,
@@ -1734,7 +1812,7 @@ function migrateDisplayContract(output) {
     }, asOf, `sources[${index}]`)),
     current: {
       ...output.current,
-      recent_tibo_posts: (output.current?.recent_tibo_posts ?? []).map(repairKnownPostText),
+      recent_tibo_posts: (output.current?.recent_tibo_posts ?? []).map(normalizeRecentPost),
       cross_source_consistent: typeof output.current?.cross_source_consistent === "boolean"
         ? output.current.cross_source_consistent
         : !output.explanation?.factors?.some((factor) => factor.feature_key === "source_consistency"),
@@ -1813,7 +1891,7 @@ function runRefreshProbe(rawProbe, existingPath, outputPath) {
   }
   const existingPost = existing?.current?.latest_overall_post;
   const existingCursorPost = maxRecentPostById(existing?.current?.recent_tibo_posts) ?? existingPost;
-  if (!usingSeed && (existing?.schema_version !== SCHEMA_VERSION || existing?.model?.version !== MODEL_VERSION)) return probeFailure("现有预测版本不兼容");
+  if (!usingSeed && (existing?.schema_version !== SCHEMA_VERSION || existing?.classification_version !== CLASSIFICATION_VERSION || existing?.model?.version !== MODEL_VERSION)) return probeFailure("现有预测版本或分类规则不兼容");
   if (!usingSeed && (existing?.status === "blocked" || !Array.isArray(existing?.forecast?.horizons) || !existing.forecast.horizons.length)) return probeFailure("现有预测结果不可复用");
   const existingTimelineReasons = recentPostIntegrityReasons(existing?.current);
   if (existingTimelineReasons.length) return probeFailure(`现有预测近期时间线校验失败：${existingTimelineReasons.join("；")}`);
@@ -1946,6 +2024,7 @@ function syntheticInput() {
     };
   });
   return {
+    classification_version: CLASSIFICATION_VERSION,
     current: {
       as_of_utc: asOf,
       cross_source_consistent: true,
@@ -2103,18 +2182,32 @@ function smokeTest() {
   if (threadedData.current.latest_overall_post.post_id !== threadedInput.current.recent_tibo_posts[1].post_id || threadedData.current.recent_tibo_posts[0].post_id !== threadedInput.current.recent_tibo_posts[1].post_id || maxRecentPostById(threadedData.current.recent_tibo_posts).post_id !== threadedInput.current.recent_tibo_posts[0].post_id) throw new Error("快速自检未区分帖子串顶部主帖与最大增量游标");
   const compactBase = syntheticInput();
   const compact = {
+    classification_version: CLASSIFICATION_VERSION,
     as_of_utc: compactBase.current.as_of_utc,
-    posts: compactBase.current.recent_tibo_posts.map((post) => ({ id: post.post_id, at: post.published_at_utc, url: post.url, text: post.text_original, zh: post.text_zh, type: post.post_type, level: post.signal_level, evidence: post.classification_evidence, latest: post.is_latest_overall })),
+    posts: compactBase.current.recent_tibo_posts.map((post) => ({ id: post.post_id, at: post.published_at_utc, url: post.url, text: post.text_original, zh: post.text_zh, type: post.post_type, level: post.signal_level, reset_meaning: inferredResetMeaning(post), evidence: post.classification_evidence, confirmed_event: false, latest: post.is_latest_overall })),
     sources: compactBase.sources.map((source) => ({ id: source.source_id, name: source.name, url: source.url, group: source.independence_group, scopes: source.evidence_scopes, post_id: source.observed_post_id, ref: source.evidence_ref })),
     status_indicator: "operational",
   };
   const compactValidation = validateSnapshot(mergeBaseHistory(compact, null));
   if (compactValidation.action !== "proceed") throw new Error(`快速自检未接受紧凑当前证据格式：${compactValidation.blocked_reasons.join("；")}`);
-  const completedCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4 }], sources: [] });
+  const compactMerged = mergeBaseHistory(compact, null);
+  const compactCurrentSignal = compactMerged.historical_signals.find((signal) => signal.post_id === compact.posts.find((post) => post.type === "reset_signal")?.id);
+  if (!compactCurrentSignal || compactCurrentSignal.outcome_time_kind !== "right_censored" || compactCurrentSignal.intent_class !== "directional_reset") throw new Error("快速自检未把 LLM 实时分类转换为模型当前信号");
+  const completedText = "I have reset Codex usage limits for everyone.";
+  const completedCompact = expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], text: completedText, type: "reset_signal", level: 4, reset_meaning: "completed", confirmed_event: true }], sources: [] });
   if (completedCompact.historical_events[0]?.event_id !== `reset-${compact.posts[0].id}`) throw new Error("快速自检未从已完成重置帖生成确认事件");
-  const companionCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], type: "reset_signal", level: 4, confirmed_event: false }], sources: [] });
+  const companionCompact = expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], text: completedText, type: "reset_signal", level: 4, reset_meaning: "completed", confirmed_event: false }], sources: [] });
   if (companionCompact.historical_events.length) throw new Error("快速自检未抑制同一帖子串的重复确认事件");
-  const latestCompact = expandCompactInput({ as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], latest: true }], sources: [] });
+  for (const invalidPost of [
+    { ...compact.posts[0], text: "Enjoy a nice reset everyone. Landing in the next hour or so.", type: "reset_signal", level: 4, reset_meaning: "completed", confirmed_event: true },
+    { ...compact.posts[0], text: "Don't say reset.", type: "other", level: 1, reset_meaning: "weak", confirmed_event: false },
+    { ...compact.posts[0], type: "social", level: 0, reset_meaning: "none", confirmed_event: false },
+  ]) {
+    let rejected = false;
+    try { expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [invalidPost], sources: [] }); } catch { rejected = true; }
+    if (!rejected) throw new Error("快速自检未阻止语义、等级、类型或确认事件冲突");
+  }
+  const latestCompact = expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], latest: true }], sources: [] });
   if (latestCompact.current.recent_tibo_posts[0]?.is_latest_overall !== true) throw new Error("快速自检未保留顶部帖子串主帖标记");
   const classifiedXIds = classifyVisibleXPostIds('/thsottiaux/status/2086800639120888014 /thsottiaux/status/2086972933566857393 /thsottiaux/status/2086874565909815403 /thsottiaux/status/2086972802457063486 /thsottiaux/status/2086353229894529148 /thsottiaux/status/2086874565909815403', [
     { id: '2086972933566857393', is_reply: true, replying_to: 'thsottiaux' },
@@ -2235,6 +2328,7 @@ function compactExistingState(outputPath) {
     result_reusable: !usingSeed && output.status !== "blocked",
     next_action: usingSeed ? "full_refresh_required" : "probe_then_reuse_or_refresh",
     schema_version: usingSeed ? SCHEMA_VERSION : output.schema_version ?? null,
+    classification_version: usingSeed ? CLASSIFICATION_VERSION : output.classification_version ?? null,
     model_version: output.model?.version ?? null,
     generated_at_utc: usingSeed ? null : output.generated_at_utc ?? null,
     status: usingSeed ? "baseline_only" : output.status ?? null,
@@ -2415,7 +2509,9 @@ async function main() {
   fs.rmSync(args.liveCollection, { force: true });
   const postResult = args.postUrl ? await postGeneratedJson(args.output, args.postUrl, args.postToken) : null;
   if (args.printReport) {
-    process.stdout.write(renderMarkdownReport(verifyArtifactBundle(args.output), args.output));
+    const verifiedOutput = verifyArtifactBundle(args.output);
+    process.stdout.write(`${JSON.stringify({ status: verifiedOutput.status, output: args.output, html_output: htmlOutput, wrote_files: true, display_allowed: true, artifact_bundle_verified: true })}\n`);
+    process.stdout.write(renderMarkdownReport(verifiedOutput, args.output));
     if (postResult) process.stdout.write(`\n提交：${postResult.url}（HTTP ${postResult.status}）\n`);
     return;
   }
