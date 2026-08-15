@@ -20,7 +20,7 @@ const DECAYS = [12, 24, 48, 72];
 const DEFAULT_WORK_TIMEZONE = "America/Los_Angeles";
 const SIGNAL_PRIOR_STRENGTH = 1;
 const SCHEMA_VERSION = "1.12.0";
-const MODEL_VERSION = "3.1.0";
+const MODEL_VERSION = "3.2.0";
 const CLASSIFICATION_VERSION = "2.0.0";
 const POST_TYPES = new Set(["reset_signal", "codex", "limits", "release", "other"]);
 const RESET_MEANING_LEVELS = new Map([["none", 0], ["weak", 1], ["directional", 2], ["explicit_future", 3], ["completed", 4]]);
@@ -39,6 +39,8 @@ const DEFAULT_STATE_PATH = "/workspace/codex-reset-forecast.json";
 const DEFAULT_LIVE_COLLECTION_PATH = "/tmp/codex-reset-live.json";
 const KNOWN_LATEST_POST_FLOOR = { post_id: "2086353229894529148", published_at_utc: "2026-08-09T07:25:47.232Z", url: "https://x.com/thsottiaux/status/2086353229894529148" };
 const COOLDOWN_HOUR_CANDIDATES = [6, 12, 24];
+const PROMISE_GRACE_HOURS = 2;
+const EXPLICIT_SIGNAL_FALLBACK_HOURS = 24;
 const KNOWN_POST_TEXT_REPAIRS = new Map(Object.entries({
   "2084738022650892544": { text_zh: "我在 OpenAI 的职位是什么？", classification_evidence: "询问在 OpenAI 的职位，与重置信号无关" },
   "2084483765158719542": { text_zh: "从我最近看到的一些结果来看，Codex 显然是一个很好的执行框架。", classification_evidence: "评价 Codex 执行框架，与重置信号无关" },
@@ -100,7 +102,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.17.0",
+    "Codex Reset Forecast 3.18.0",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
@@ -213,6 +215,46 @@ function hasExplicitCompletedResetMeaning(text) {
   ].some((pattern) => pattern.test(value));
 }
 
+function inferredPromisedWindowEndAt(post) {
+  if (post?.promised_window_end_at_utc || post?.window_end) return iso(post.promised_window_end_at_utc ?? post.window_end, "post.promised_window_end_at_utc");
+  const publishedAtMs = new Date(post?.published_at_utc ?? post?.at).getTime();
+  if (!Number.isFinite(publishedAtMs)) return null;
+  const text = String(post?.text_original ?? post?.text ?? "").replace(/[’]/g, "'").replace(/\s+/g, " ");
+  let hours = null;
+  const numericHours = text.match(/\b(?:in\s+)?(?:the\s+)?next\s+(\d+(?:\.\d+)?)\s+hours?\b/i);
+  if (numericHours) hours = Number(numericHours[1]);
+  else if (/\bnext\s+hour\s+or\s+so\b/i.test(text)) hours = 2;
+  else if (/\b(?:in\s+)?(?:the\s+)?next\s+hour\b|\bin\s+an\s+hour\b/i.test(text)) hours = 1;
+  else if (/\b(?:in\s+)?a\s+few\s+hours\b|\bin\s+few\s+hours\b/i.test(text)) hours = 6;
+  else if (/\btomorrow\b/i.test(text)) hours = 36;
+  return Number.isFinite(hours) && hours > 0 ? new Date(publishedAtMs + hours * 3600_000).toISOString() : null;
+}
+
+function compactObservedResetEvents(rawInput) {
+  if (!Array.isArray(rawInput?.reset_events)) return [];
+  const sourceByRef = new Map((rawInput.sources ?? []).map((source) => [String(source.ref ?? source.url ?? ""), source]));
+  return rawInput.reset_events.map((event, index) => {
+    const label = `reset_events[${index}]`;
+    const sourceRefs = Array.isArray(event?.source_refs) ? [...new Set(event.source_refs.map(String))] : [];
+    const supportingSources = sourceRefs.map((ref) => sourceByRef.get(ref));
+    const groups = new Set(supportingSources.map((source) => String(source?.group ?? "")).filter(Boolean));
+    if (!String(event?.id ?? "").trim() || !event?.at || !String(event?.url ?? "").trim()) throw new Error(`${label} 缺少 id、at 或 url`);
+    if (sourceRefs.length < 2 || supportingSources.some((source) => !source) || groups.size < 2 || supportingSources.some((source) => !(source.scopes ?? []).includes("reset_history"))) throw new Error(`${label} 必须由两个不同 group 且声明 reset_history 的来源共同核验`);
+    const eventAt = iso(event.at, `${label}.at`);
+    const effectiveAt = event.effective_at ? iso(event.effective_at, `${label}.effective_at`) : eventAt;
+    if (new Date(eventAt).getTime() > new Date(rawInput.as_of_utc).getTime()) throw new Error(`${label}.at 不能晚于 as_of_utc`);
+    if (new Date(effectiveAt).getTime() > new Date(rawInput.as_of_utc).getTime()) throw new Error(`${label}.effective_at 不能晚于 as_of_utc`);
+    const confidence = Number(event.confidence ?? 0.9);
+    if (!Number.isFinite(confidence) || confidence < 0.7 || confidence > 1) throw new Error(`${label}.confidence 必须为 0.7—1`);
+    return {
+      event_id: `reset-observed-${String(event.id)}`, event_type: "confirmed_reset", announced_at_utc: eventAt,
+      effective_at_utc: effectiveAt,
+      post_id: null, source_url: String(event.url), confidence,
+      reason_tags: ["silent_reset_observation", ...sourceRefs.map((ref) => `source:${ref}`)], included_in_training: true, exclusion_reason: null,
+    };
+  });
+}
+
 function assertCompactPostClassifications(rawInput) {
   if (rawInput?.classification_version !== CLASSIFICATION_VERSION) throw new Error(`classification_version 必须为 ${CLASSIFICATION_VERSION}，旧分类不得复用`);
   rawInput.posts.forEach((post, index) => {
@@ -255,7 +297,7 @@ function expandCompactInput(rawInput) {
     event_id: `reset-${post.post_id}`, event_type: "confirmed_reset", announced_at_utc: post.published_at_utc,
     effective_at_utc: null, post_id: post.post_id, source_url: post.url, confidence: 1,
     reason_tags: ["tibo_announcement"], included_in_training: true, exclusion_reason: null,
-  }));
+  })).concat(compactObservedResetEvents(rawInput));
   const currentSignals = posts.filter((post) => post.exclude !== true && post.post_type === "reset_signal" && post.signal_level > 0 && post.signal_level < 4).map((post) => ({
     post_id: post.post_id,
     published_at_utc: post.published_at_utc,
@@ -264,7 +306,7 @@ function expandCompactInput(rawInput) {
     signal_level: post.signal_level,
     intent_class: post.reset_meaning === "explicit_future" ? "explicit_commitment" : post.reset_meaning === "directional" ? "directional_reset" : "weak_mention",
     has_explicit_timing: post.reset_meaning === "explicit_future",
-    promised_window_end_at_utc: null,
+    promised_window_end_at_utc: inferredPromisedWindowEndAt(post),
     outcome_status: "not_observed",
     outcome_time_kind: "right_censored",
     reset_at_utc: null,
@@ -773,7 +815,7 @@ function normalizeInput(input) {
     included_in_training: Boolean(event.included_in_training),
     exclusion_reason: event.exclusion_reason == null ? null : String(event.exclusion_reason),
   })).sort((a, b) => new Date(a.announced_at_utc) - new Date(b.announced_at_utc));
-  const signals = (Array.isArray(input.historical_signals) ? input.historical_signals : []).map((signal) => ({
+  const signals = reconcileSignalsWithEvents((Array.isArray(input.historical_signals) ? input.historical_signals : []).map((signal) => ({
     post_id: String(signal.post_id ?? ""),
     published_at_utc: iso(signal.published_at_utc, "signal.published_at_utc"),
     url: String(signal.url ?? ""),
@@ -795,7 +837,7 @@ function normalizeInput(input) {
     reset_within_4h: Boolean(signal.reset_within_4h),
     reset_within_24h: Boolean(signal.reset_within_24h),
     reset_within_72h: Boolean(signal.reset_within_72h),
-  })).sort((a, b) => new Date(a.published_at_utc) - new Date(b.published_at_utc));
+  })).sort((a, b) => new Date(a.published_at_utc) - new Date(b.published_at_utc)), events);
   const contexts = (Array.isArray(input.historical_contexts) ? input.historical_contexts : []).map((context) => ({
     context_id: String(context.context_id ?? ""),
     context_type: String(context.context_type ?? ""),
@@ -853,6 +895,57 @@ function confirmedEvents(data) {
     seen.add(event.event_id);
     return true;
   });
+}
+
+function signalResolutionDeadlineMs(signal) {
+  const publishedAtMs = new Date(signal?.published_at_utc).getTime();
+  if (!Number.isFinite(publishedAtMs)) return NaN;
+  const promisedEndAt = signal?.promised_window_end_at_utc ?? inferredPromisedWindowEndAt(signal);
+  if (promisedEndAt) return new Date(promisedEndAt).getTime() + PROMISE_GRACE_HOURS * 3600_000;
+  const fallbackHours = signal?.intent_class === "directional_reset" ? 72 : signal?.intent_class === "weak_mention" ? 24 : EXPLICIT_SIGNAL_FALLBACK_HOURS;
+  return publishedAtMs + fallbackHours * 3600_000;
+}
+
+function firstConfirmedEventAfter(signal, events) {
+  const signalAtMs = new Date(signal?.published_at_utc).getTime();
+  return events.find((event) => new Date(event.effective_at_utc ?? event.announced_at_utc).getTime() >= signalAtMs) ?? null;
+}
+
+function reconcileSignalsWithEvents(signals, events) {
+  return signals.map((signal) => {
+    if (signal.matched_reset_event_id || signal.outcome_time_kind !== "right_censored") return signal;
+    const deadlineMs = signalResolutionDeadlineMs(signal);
+    const signalAtMs = new Date(signal.published_at_utc).getTime();
+    const event = events.find((item) => {
+      const eventAtMs = new Date(item.effective_at_utc ?? item.announced_at_utc).getTime();
+      return eventAtMs >= signalAtMs && eventAtMs <= deadlineMs;
+    }) ?? null;
+    if (!event) return signal;
+    const resetAt = event.effective_at_utc ?? event.announced_at_utc;
+    const hours = Math.max(0, (new Date(resetAt).getTime() - new Date(signal.published_at_utc).getTime()) / 3600_000);
+    return {
+      ...signal,
+      outcome_status: "confirmed_exact",
+      outcome_time_kind: "exact",
+      reset_at_utc: resetAt,
+      latency_lower_hours: hours,
+      latency_upper_hours: hours,
+      matched_reset_event_id: event.event_id,
+      hours_to_reset: hours,
+      reset_within_4h: hours <= 4,
+      reset_within_24h: hours <= 24,
+      reset_within_72h: hours <= 72,
+    };
+  });
+}
+
+function resolveCurrentSignal(data, events, asOfMs) {
+  const candidate = data.signals.find((signal) => signal.post_id === data.current.latest_reset_signal?.post_id) ?? null;
+  if (!candidate || candidate.matched_reset_event_id || candidate.outcome_time_kind !== "right_censored") return { signal: null, expiredUnresolved: null };
+  if (firstConfirmedEventAfter(candidate, events)) return { signal: null, expiredUnresolved: null };
+  const expired = asOfMs > signalResolutionDeadlineMs(candidate);
+  if (!expired) return { signal: candidate, expiredUnresolved: null };
+  return { signal: null, expiredUnresolved: candidate.intent_class === "explicit_commitment" ? candidate : null };
 }
 
 function refreshFingerprintPayload({ latestOverallPost, latestResetSignal, lastResetEventId, lastResetAt, statusIndicator, activeIncidentId }) {
@@ -1008,7 +1101,9 @@ function bayesianSignalAdjustment(points, data, currentSignal, asOfMs) {
       const targetAge = currentAge + point.hour;
       const weight = signalSimilarity(signal, currentSignal, targetAge);
       if (Number.isFinite(upper)) {
-        if (upper <= targetAge) {
+        if (upper <= currentAge) {
+          unavailableCount += 1;
+        } else if (upper <= targetAge) {
           successWeight += weight;
           if (signal.outcome_time_kind === "exact") exactCount += 1;
           else intervalCount += 1;
@@ -1017,7 +1112,8 @@ function bayesianSignalAdjustment(points, data, currentSignal, asOfMs) {
         continue;
       }
       const observedHours = (new Date(signal.observation_end_at_utc).getTime() - new Date(signal.published_at_utc).getTime()) / 3600_000;
-      if (observedHours >= targetAge) failureWeight += weight;
+      if (observedHours < currentAge) unavailableCount += 1;
+      else if (observedHours >= targetAge) failureWeight += weight;
       else unavailableCount += 1;
     }
     const base = point.probability;
@@ -1540,9 +1636,10 @@ function runForecast(rawInput) {
   const lastResetMs = new Date(lastReset.announced_at_utc).getTime();
   const asOfMs = new Date(data.asOf).getTime();
   if (asOfMs < lastResetMs) return buildBlockedOutput(data, ["当前时间早于最近一次确认重置，存在数据倒退"]);
+  const signalResolution = resolveCurrentSignal(data, events, asOfMs);
+  if (signalResolution.expiredUnresolved) return buildBlockedOutput(data, [`明确重置承诺的观察窗口已结束，但没有独立证据确认是否已静默重置；已停止旧信号加成，等待 reset_history 双来源核验`]);
   const forecast = cumulativeForecast(model, data, lastResetMs, asOfMs);
-  const latestSignalRecord = data.signals.find((signal) => signal.post_id === data.current.latest_reset_signal?.post_id) ?? null;
-  const currentSignal = latestSignalRecord && !latestSignalRecord.matched_reset_event_id && latestSignalRecord.outcome_time_kind === "right_censored" ? latestSignalRecord : null;
+  const currentSignal = signalResolution.signal;
   const adjustedPoints = currentSignal ? bayesianSignalAdjustment(forecast.points, data, currentSignal, asOfMs) : baselineAdjustedPoints(forecast.points);
   const signalValidation = signalWalkForwardValidation(events, data);
   const horizons = adjustedPoints.map((point, index) => {
@@ -1878,6 +1975,24 @@ function probeFailure(reason) {
   return { action: "full_refresh", reason, wrote_files: false };
 }
 
+function existingPromiseNeedsResolution(existing, checkedAt) {
+  const latest = existing?.current?.latest_reset_signal;
+  if (Number(latest?.signal_level) !== 3) return false;
+  const signal = existing?.history?.signals?.find((item) => String(item?.post_id) === String(latest.post_id)) ?? {
+    ...latest,
+    published_at_utc: latest.published_at_utc,
+    text: latest.text,
+    signal_level: 3,
+    intent_class: "explicit_commitment",
+    outcome_time_kind: "right_censored",
+    matched_reset_event_id: null,
+  };
+  if (signal.matched_reset_event_id || signal.outcome_time_kind !== "right_censored") return false;
+  const events = (existing?.history?.events ?? []).filter((event) => event.event_type === "confirmed_reset" && event.included_in_training && Number(event.confidence) >= 0.7);
+  if (firstConfirmedEventAfter(signal, events)) return false;
+  return new Date(checkedAt).getTime() > signalResolutionDeadlineMs(signal);
+}
+
 function runRefreshProbe(rawProbe, existingPath, outputPath) {
   void outputPath;
   const usingSeed = !existingPath || !fs.existsSync(existingPath);
@@ -1919,6 +2034,7 @@ function runRefreshProbe(rawProbe, existingPath, outputPath) {
   if (BigInt(remoteId) < BigInt(requiredFloorId)) return { action: "retry_probe", reason: `远程候选早于已知最低锚点 ${requiredFloorId}`, existing_post_id: existingId, remote_post_id: remoteId, wrote_files: false };
   if (remoteId === existingId) {
     if (usingSeed) return { action: "full_refresh", reason: "cold_start_seed_anchor", existing_post_id: existingId, remote_post_id: remoteId, checked_at_utc: probe.checkedAt, wrote_files: false };
+    if (existingPromiseNeedsResolution(existing, probe.checkedAt)) return { action: "full_refresh", reason: "signal_outcome_window_elapsed", existing_post_id: existingId, remote_post_id: remoteId, checked_at_utc: probe.checkedAt, wrote_files: false };
     return {
       action: "reuse_existing",
       reason: "same_latest_post",
@@ -2069,6 +2185,38 @@ function selfTest() {
   const output = runForecast(syntheticInput());
   validateOutput(output);
   if (output.status === "blocked") throw new Error(`自检被意外阻断：${output.blocked_reasons.join("；")}`);
+  const inferredWindowStart = "2026-08-13T01:01:37Z";
+  if (inferredPromisedWindowEndAt({ at: inferredWindowStart, text: "Landing in the next hour or so" }) !== "2026-08-13T03:01:37.000Z") throw new Error("自检未解析明确承诺窗口");
+  const expiredInput = syntheticInput();
+  const expiredAtMs = new Date(expiredInput.current.as_of_utc).getTime() - 23 * 3600_000;
+  const expiredPostId = ((BigInt(expiredAtMs) - X_EPOCH_MS) << 22n).toString();
+  const expiredPost = expiredInput.current.recent_tibo_posts[1];
+  expiredPost.post_id = expiredPostId;
+  expiredPost.published_at_utc = new Date(expiredAtMs).toISOString();
+  expiredPost.url = `${TIBO_X_URL}/status/${expiredPostId}`;
+  expiredPost.text_original = "Enjoy a nice reset everyone. Landing in the next hour or so.";
+  expiredPost.post_type = "reset_signal";
+  expiredPost.signal_level = 3;
+  expiredPost.reset_meaning = "explicit_future";
+  expiredInput.current.latest_reset_signal = postFromRecent(normalizeRecentPost(expiredPost));
+  expiredInput.historical_signals.push({
+    post_id: expiredPostId, published_at_utc: expiredPost.published_at_utc, url: expiredPost.url, text: expiredPost.text_original,
+    signal_level: 3, intent_class: "explicit_commitment", has_explicit_timing: true,
+    promised_window_end_at_utc: inferredPromisedWindowEndAt(expiredPost), outcome_status: "not_observed", outcome_time_kind: "right_censored",
+    observation_end_at_utc: expiredInput.current.as_of_utc, confidence: 1, classification_evidence: "明确未来承诺",
+    matched_reset_event_id: null, hours_to_reset: null, reset_within_4h: false, reset_within_24h: false, reset_within_72h: false,
+  });
+  const expiredOutput = runForecast(expiredInput);
+  if (expiredOutput.status !== "blocked" || !expiredOutput.blocked_reasons.some((reason) => reason.includes("静默重置"))) throw new Error("自检未阻止过期但结果未知的明确重置承诺");
+  if (!existingPromiseNeedsResolution(expiredOutput, expiredInput.current.as_of_utc)) throw new Error("自检未在帖子 ID 不变时触发过期承诺刷新");
+  const resolvedInput = structuredClone(expiredInput);
+  const observedAt = new Date(expiredAtMs + 90 * 60_000).toISOString();
+  resolvedInput.historical_events.push({ event_id: "reset-silent", event_type: "confirmed_reset", announced_at_utc: observedAt, effective_at_utc: observedAt, post_id: null, source_url: "https://tracker.example/reset-silent", confidence: 0.9, reason_tags: ["silent_reset_observation"], included_in_training: true, exclusion_reason: null });
+  const resolvedOutput = runForecast(resolvedInput);
+  if (resolvedOutput.status === "blocked" || resolvedOutput.forecast.horizons.some((row) => row.signal_probability_delta !== 0)) throw new Error("自检未用静默重置事件关闭旧信号并回到重置后基线");
+  const conditionalCurrent = { post_id: "current", published_at_utc: "2026-01-02T00:00:00Z", signal_level: 3, intent_class: "explicit_commitment" };
+  const conditionalPoints = bayesianSignalAdjustment([{ hour: 2, probability: 0.1 }], { signals: [{ post_id: "old", published_at_utc: "2026-01-01T00:00:00Z", signal_level: 3, intent_class: "explicit_commitment", confidence: 1, latency_lower_hours: 1, latency_upper_hours: 1, outcome_time_kind: "exact" }] }, conditionalCurrent, Date.parse("2026-01-02T10:00:00Z"));
+  if (conditionalPoints[0].posterior.weighted_successes !== 0 || conditionalPoints[0].posterior.unavailable_outcome_count !== 1) throw new Error("自检未按已等待条件排除早已落地的历史信号");
   if (output.current.recent_tibo_posts.length !== 12 || output.current.recent_tibo_posts.some((post, index, posts) => index > 0 && compareRecentPosts(posts[index - 1], post) > 0)) throw new Error("自检近期动态未完整保留或未按最新优先排序");
   const mismatchedTimelineInput = syntheticInput();
   mismatchedTimelineInput.current.recent_tibo_posts[2].published_at_utc = mismatchedTimelineInput.current.recent_tibo_posts[3].published_at_utc;
@@ -2198,6 +2346,15 @@ function smokeTest() {
   if (completedCompact.historical_events[0]?.event_id !== `reset-${compact.posts[0].id}`) throw new Error("快速自检未从已完成重置帖生成确认事件");
   const companionCompact = expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], text: completedText, type: "reset_signal", level: 4, reset_meaning: "completed", confirmed_event: false }], sources: [] });
   if (companionCompact.historical_events.length) throw new Error("快速自检未抑制同一帖子串的重复确认事件");
+  const trackerSources = [
+    { id: "tracker_a", url: "https://tracker-a.example/event", group: "tracker_a", scopes: ["reset_history"], ref: "source:tracker_a" },
+    { id: "tracker_b", url: "https://tracker-b.example/event", group: "tracker_b", scopes: ["reset_history"], ref: "source:tracker_b" },
+  ];
+  const silentCompact = expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [], sources: trackerSources, reset_events: [{ id: "silent-1", at: compact.as_of_utc, url: trackerSources[0].url, source_refs: trackerSources.map((source) => source.ref) }] });
+  if (silentCompact.historical_events[0]?.event_id !== "reset-observed-silent-1") throw new Error("快速自检未接受双来源核验的静默重置事件");
+  let singleTrackerRejected = false;
+  try { expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [], sources: trackerSources, reset_events: [{ id: "silent-2", at: compact.as_of_utc, url: trackerSources[0].url, source_refs: [trackerSources[0].ref] }] }); } catch { singleTrackerRejected = true; }
+  if (!singleTrackerRejected) throw new Error("快速自检未拒绝单来源静默重置事件");
   for (const invalidPost of [
     { ...compact.posts[0], text: "Enjoy a nice reset everyone. Landing in the next hour or so.", type: "reset_signal", level: 4, reset_meaning: "completed", confirmed_event: true },
     { ...compact.posts[0], text: "Don't say reset.", type: "other", level: 1, reset_meaning: "weak", confirmed_event: false },
