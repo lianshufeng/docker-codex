@@ -1,6 +1,7 @@
 name: Mirror to CNB
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - '**'
