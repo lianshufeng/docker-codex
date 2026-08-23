@@ -3,7 +3,7 @@ name: codex-reset-forecast
 description: 当用户询问 Codex 额度重置时间、Tibo/thsottiaux 重置信号、重置概率或希望预测 Codex reset 时使用。默认先读取现有预测 JSON，再用内置实时清单审计 Tibo Posts 的 ID 与原文完整性；只有 ID、原文或状态变化时才重算，稳定历史默认由脚本本地复用。禁止绕过清单和 AI 自行修改概率。
 ---
 
-> 技能版本：3.18.0（5.4-mini 固定入口）
+> 技能版本：3.18.1（5.4-mini 固定入口）
 
 ## 5.4-mini 固定入口（必须先执行）
 

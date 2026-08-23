@@ -20,7 +20,7 @@ const DECAYS = [12, 24, 48, 72];
 const DEFAULT_WORK_TIMEZONE = "America/Los_Angeles";
 const SIGNAL_PRIOR_STRENGTH = 1;
 const SCHEMA_VERSION = "1.12.0";
-const MODEL_VERSION = "3.2.0";
+const MODEL_VERSION = "3.2.1";
 const CLASSIFICATION_VERSION = "2.0.0";
 const POST_TYPES = new Set(["reset_signal", "codex", "limits", "release", "other"]);
 const RESET_MEANING_LEVELS = new Map([["none", 0], ["weak", 1], ["directional", 2], ["explicit_future", 3], ["completed", 4]]);
@@ -47,6 +47,7 @@ const KNOWN_POST_TEXT_REPAIRS = new Map(Object.entries({
   "2084196918071357707": { text_zh: "OpenAI 很神奇：你只要打开笔记本电脑，让 Codex 创建一个 PR，就能把改进发布给 10 亿用户。", signal_level: 0, reset_meaning: "none", classification_evidence: "描述产品开发体验，与重置信号无关" },
   "2083596911060324570": { text_zh: "基本上就是 ChatGPT 发布前一年的样子。当时叫 LMChat，后来又换了一个代号。DeepMind 当时被阻止发布产品。", classification_evidence: "回顾产品历史，与重置信号无关" },
   "2083395449814229287": { text_zh: "为了庆祝高效的一周，也让你这个周末运行 10 万个 Luna 线程……没错……等着瞧……我已经重置了 Codex 和 ChatGPT Work 的使用额度。尽情享受吧。", classification_evidence: "明确表示已重置 Codex 与 ChatGPT Work 的使用额度" },
+  "2086188036493344823": { text_zh: "没错，GPT-5.6 Sol 很棒，几乎可以在任何地方使用，包括 CC harness。为了庆祝这一点，也因为我不会离开，我已经为所有 ChatGPT Work 和 Codex 付费用户重置了使用额度。大家玩得开心！", post_type: "reset_signal", signal_level: 4, reset_meaning: "completed", classification_evidence: "明确表示已为所有 ChatGPT Work 和 Codex 付费用户重置额度" },
   "2083024093037953322": { text_zh: "@brandon_galang 小模型也能大有作为。", classification_evidence: "评价小模型，与重置信号无关" },
   "2082883636177916306": { text_zh: "我们一直忙于 GPT-5.6 Sol，它在很多任务上表现很好。此次更新包括：Luna 价格降低 80%、Terra 价格降低 20%、GPT-5.6 Sol 的 /fast 模式更快，以及应用内自动批准模式便宜约 10 倍。", signal_level: 0, reset_meaning: "none", classification_evidence: "产品发布与价格更新，不是重置信号" },
   "2082317452755751098": { text_zh: "Sol 的用户们，大家好！我已经为所有 ChatGPT Work 和 Codex 用户重置了使用额度。同时简单更新一下 GPT-5.6 Sol 的额度情况：过去几周，很多人反馈 Sol 消耗 Codex 额度的速度比预期更快。", classification_evidence: "明确表示已为所有 ChatGPT Work 和 Codex 用户重置额度" },
@@ -102,7 +103,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Codex Reset Forecast 3.18.0",
+    "Codex Reset Forecast 3.18.1",
     "",
     "紧凑增量（推荐）：node scripts/forecast.mjs --input-once .codex-reset-input.json --base-history <existing.json> --print-report [--output <json>]",
     "读取紧凑状态：node scripts/forecast.mjs --state <existing.json>",
@@ -230,6 +231,36 @@ function inferredPromisedWindowEndAt(post) {
   return Number.isFinite(hours) && hours > 0 ? new Date(publishedAtMs + hours * 3600_000).toISOString() : null;
 }
 
+function historicalSignalsFromRecentPosts(posts, asOf) {
+  return (Array.isArray(posts) ? posts : []).filter((post) => post?.exclude !== true).map((post) => {
+    const normalized = normalizeRecentPost(post);
+    if (normalized.post_type !== "reset_signal" || normalized.signal_level <= 0 || normalized.signal_level >= 4) return null;
+    return {
+      post_id: normalized.post_id,
+      published_at_utc: normalized.published_at_utc,
+      url: normalized.url,
+      text: normalized.text_original,
+      signal_level: normalized.signal_level,
+      intent_class: normalized.reset_meaning === "explicit_future" ? "explicit_commitment" : normalized.reset_meaning === "directional" ? "directional_reset" : "weak_mention",
+      has_explicit_timing: normalized.reset_meaning === "explicit_future",
+      promised_window_end_at_utc: inferredPromisedWindowEndAt(post),
+      outcome_status: "not_observed",
+      outcome_time_kind: "right_censored",
+      reset_at_utc: null,
+      latency_lower_hours: null,
+      latency_upper_hours: null,
+      observation_end_at_utc: asOf,
+      confidence: 1,
+      classification_evidence: normalized.classification_evidence,
+      matched_reset_event_id: null,
+      hours_to_reset: null,
+      reset_within_4h: false,
+      reset_within_24h: false,
+      reset_within_72h: false,
+    };
+  }).filter(Boolean);
+}
+
 function compactObservedResetEvents(rawInput) {
   if (!Array.isArray(rawInput?.reset_events)) return [];
   const sourceByRef = new Map((rawInput.sources ?? []).map((source) => [String(source.ref ?? source.url ?? ""), source]));
@@ -286,6 +317,7 @@ function expandCompactInput(rawInput) {
     post_type: String(post.type ?? "other"),
     signal_level: Number(post.level ?? 0),
     reset_meaning: String(post.reset_meaning ?? "none"),
+    ...(post.window_end ? { promised_window_end_at_utc: post.window_end } : {}),
     ...(post.evidence ? { classification_evidence: String(post.evidence) } : {}),
     ...(post.correction === true ? { correction: true } : {}),
     ...(post.exclude === true ? { exclude: true } : {}),
@@ -298,29 +330,7 @@ function expandCompactInput(rawInput) {
     effective_at_utc: null, post_id: post.post_id, source_url: post.url, confidence: 1,
     reason_tags: ["tibo_announcement"], included_in_training: true, exclusion_reason: null,
   })).concat(compactObservedResetEvents(rawInput));
-  const currentSignals = posts.filter((post) => post.exclude !== true && post.post_type === "reset_signal" && post.signal_level > 0 && post.signal_level < 4).map((post) => ({
-    post_id: post.post_id,
-    published_at_utc: post.published_at_utc,
-    url: post.url,
-    text: post.text_original,
-    signal_level: post.signal_level,
-    intent_class: post.reset_meaning === "explicit_future" ? "explicit_commitment" : post.reset_meaning === "directional" ? "directional_reset" : "weak_mention",
-    has_explicit_timing: post.reset_meaning === "explicit_future",
-    promised_window_end_at_utc: inferredPromisedWindowEndAt(post),
-    outcome_status: "not_observed",
-    outcome_time_kind: "right_censored",
-    reset_at_utc: null,
-    latency_lower_hours: null,
-    latency_upper_hours: null,
-    observation_end_at_utc: rawInput.as_of_utc,
-    confidence: 1,
-    classification_evidence: post.classification_evidence,
-    matched_reset_event_id: null,
-    hours_to_reset: null,
-    reset_within_4h: false,
-    reset_within_24h: false,
-    reset_within_72h: false,
-  }));
+  const currentSignals = historicalSignalsFromRecentPosts(posts, rawInput.as_of_utc);
   return {
     classification_version: rawInput.classification_version,
     current: { as_of_utc: rawInput.as_of_utc, cross_source_consistent: rawInput.cross_source_consistent !== false, tibo_work_timezone: rawInput.tibo_work_timezone ?? DEFAULT_WORK_TIMEZONE, recent_tibo_posts: posts },
@@ -356,7 +366,7 @@ function mergeBaseHistory(rawInput, baseHistoryPath) {
       recent_tibo_posts: mergeRecentPosts(base.current?.recent_tibo_posts ?? [], rawInput.current?.recent_tibo_posts ?? []),
     },
     historical_events: mergeByKey(base.history.events, rawInput.historical_events ?? [], "event_id"),
-    historical_signals: mergeByKey(base.history.signals, rawInput.historical_signals ?? [], "post_id"),
+    historical_signals: mergeByKey(base.history.signals, [...historicalSignalsFromRecentPosts(base.current?.recent_tibo_posts ?? [], rawInput.current?.as_of_utc), ...(rawInput.historical_signals ?? [])], "post_id"),
     historical_contexts: mergeByKey(base.history.contexts, rawInput.historical_contexts ?? [], "context_id"),
   };
 }
@@ -837,7 +847,7 @@ function normalizeInput(input) {
     reset_within_4h: Boolean(signal.reset_within_4h),
     reset_within_24h: Boolean(signal.reset_within_24h),
     reset_within_72h: Boolean(signal.reset_within_72h),
-  })).sort((a, b) => new Date(a.published_at_utc) - new Date(b.published_at_utc)), events);
+  })).filter((signal) => !isLegacyCompletedAnnouncementSignal(signal, events)).sort((a, b) => new Date(a.published_at_utc) - new Date(b.published_at_utc)), events);
   const contexts = (Array.isArray(input.historical_contexts) ? input.historical_contexts : []).map((context) => ({
     context_id: String(context.context_id ?? ""),
     context_type: String(context.context_type ?? ""),
@@ -937,6 +947,11 @@ function reconcileSignalsWithEvents(signals, events) {
       reset_within_72h: hours <= 72,
     };
   });
+}
+
+function isLegacyCompletedAnnouncementSignal(signal, events) {
+  if (signal.outcome_time_kind !== "exact" || signal.latency_lower_hours !== 0 || signal.latency_upper_hours !== 0) return false;
+  return events.some((event) => event.post_id === signal.post_id || event.event_id === signal.matched_reset_event_id);
 }
 
 function resolveCurrentSignal(data, events, asOfMs) {
@@ -2217,6 +2232,10 @@ function selfTest() {
   const conditionalCurrent = { post_id: "current", published_at_utc: "2026-01-02T00:00:00Z", signal_level: 3, intent_class: "explicit_commitment" };
   const conditionalPoints = bayesianSignalAdjustment([{ hour: 2, probability: 0.1 }], { signals: [{ post_id: "old", published_at_utc: "2026-01-01T00:00:00Z", signal_level: 3, intent_class: "explicit_commitment", confidence: 1, latency_lower_hours: 1, latency_upper_hours: 1, outcome_time_kind: "exact" }] }, conditionalCurrent, Date.parse("2026-01-02T10:00:00Z"));
   if (conditionalPoints[0].posterior.weighted_successes !== 0 || conditionalPoints[0].posterior.unavailable_outcome_count !== 1) throw new Error("自检未按已等待条件排除早已落地的历史信号");
+  const explicitPriorPoints = bayesianSignalAdjustment([{ hour: 4, probability: 0.1 }], { signals: [{ post_id: "prior-explicit", published_at_utc: "2026-01-01T00:00:00Z", signal_level: 3, intent_class: "explicit_commitment", confidence: 1, latency_lower_hours: 2, latency_upper_hours: 2, outcome_time_kind: "exact" }] }, { post_id: "current-explicit", published_at_utc: "2026-01-02T00:00:00Z", signal_level: 3, intent_class: "explicit_commitment" }, Date.parse("2026-01-02T00:00:00Z"));
+  if (explicitPriorPoints[0].probability <= 0.5) throw new Error("自检明确预告没有从历史明确预告的兑现结果获得有效加成");
+  const legacyAnnouncement = { post_id: "done", outcome_time_kind: "exact", latency_lower_hours: 0, latency_upper_hours: 0, matched_reset_event_id: "reset-done" };
+  if (!isLegacyCompletedAnnouncementSignal(legacyAnnouncement, [{ event_id: "reset-done", post_id: "done" }])) throw new Error("自检未识别旧基座中的已完成公告伪信号");
   if (output.current.recent_tibo_posts.length !== 12 || output.current.recent_tibo_posts.some((post, index, posts) => index > 0 && compareRecentPosts(posts[index - 1], post) > 0)) throw new Error("自检近期动态未完整保留或未按最新优先排序");
   const mismatchedTimelineInput = syntheticInput();
   mismatchedTimelineInput.current.recent_tibo_posts[2].published_at_utc = mismatchedTimelineInput.current.recent_tibo_posts[3].published_at_utc;
@@ -2341,6 +2360,9 @@ function smokeTest() {
   const compactMerged = mergeBaseHistory(compact, null);
   const compactCurrentSignal = compactMerged.historical_signals.find((signal) => signal.post_id === compact.posts.find((post) => post.type === "reset_signal")?.id);
   if (!compactCurrentSignal || compactCurrentSignal.outcome_time_kind !== "right_censored" || compactCurrentSignal.intent_class !== "directional_reset") throw new Error("快速自检未把 LLM 实时分类转换为模型当前信号");
+  const promisedWindowEnd = new Date(new Date(compact.as_of_utc).getTime() + 12 * 3600_000).toISOString();
+  const promisedCompact = expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], text: "I will reset Codex usage limits later today.", zh: "我会在今天晚些时候重置 Codex 使用额度。", type: "reset_signal", level: 3, reset_meaning: "explicit_future", evidence: "明确表示未来会重置", confirmed_event: false, window_end: promisedWindowEnd }], sources: [] });
+  if (promisedCompact.historical_signals[0]?.promised_window_end_at_utc !== promisedWindowEnd) throw new Error("快速自检丢失 LLM 提供的明确承诺窗口上限");
   const completedText = "I have reset Codex usage limits for everyone.";
   const completedCompact = expandCompactInput({ classification_version: CLASSIFICATION_VERSION, as_of_utc: compact.as_of_utc, posts: [{ ...compact.posts[0], text: completedText, type: "reset_signal", level: 4, reset_meaning: "completed", confirmed_event: true }], sources: [] });
   if (completedCompact.historical_events[0]?.event_id !== `reset-${compact.posts[0].id}`) throw new Error("快速自检未从已完成重置帖生成确认事件");
