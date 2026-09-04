@@ -532,13 +532,14 @@ function xStatusTransportUrl(postId) {
 
 function textFromXStatusHtml(raw, postId) {
   const html = String(raw);
-  const title = html.match(/<title>Tibo on X: &quot;([\s\S]*?)&quot; \/ X<\/title>/i)?.[1];
+  const title = html.match(/<title>Tibo on X: &quot;([\s\S]*?) \/ X<\/title>/i)?.[1];
   if (!title) throw new Error(`X 代理未返回帖子 ${postId} 的标题正文`);
-  const titleText = decodeHtmlEntities(decodeHtmlEntities(title)).trim();
+  const titleText = decodeHtmlEntities(decodeHtmlEntities(title)).replace(/"$/, "").trim();
   const noteTexts = [...html.matchAll(/__typename:"NoteTweet",text:"((?:\\.|[^"\\])*)"/g)].map((match) => {
     try { return decodeHtmlEntities(decodeHtmlEntities(JSON.parse(`"${match[1]}"`))).trim(); } catch { return ""; }
   }).filter(Boolean);
-  const matchingNote = noteTexts.filter((text) => text.startsWith(titleText)).sort((a, b) => b.length - a.length)[0];
+  const titlePrefix = titleText.replace(/\s*(?:…|\.\.\.)$/, "").trimEnd();
+  const matchingNote = noteTexts.filter((text) => text.startsWith(titlePrefix)).sort((a, b) => b.length - a.length)[0];
   return matchingNote ?? titleText;
 }
 
@@ -2395,6 +2396,8 @@ function smokeTest() {
   if (classifiedXIds.eligible.join(',') !== '2086972933566857393,2086972802457063486,2086874565909815403,2086353229894529148' || classifiedXIds.topLevel.join(',') !== '2086972802457063486,2086874565909815403,2086353229894529148') throw new Error("快速自检未正确排序主帖、保留自身帖子串或排除普通回复");
   const proxyText = textFromXStatusHtml('<title>Tibo on X: &quot;Long &amp; useful&quot; / X</title> unrelated __typename:"NoteTweet",text:"Other text" target __typename:"NoteTweet",text:"Long &amp; useful\\n\\ncomplete text"', 'proxy-test');
   if (proxyText !== 'Long & useful\n\ncomplete text') throw new Error("快速自检未从 X 代理单帖页提取完整长帖正文");
+  const truncatedTitleText = textFromXStatusHtml('<title>Tibo on X: &quot;Long truncated… / X</title> __typename:"NoteTweet",text:"Long truncated complete text"', 'proxy-truncated-title-test');
+  if (truncatedTitleText !== 'Long truncated complete text') throw new Error("快速自检未兼容 X 长帖标题截断格式");
   if (comparableXText('Same post https://t.co/example') !== comparableXText('Same post') || comparableXText('Truncated… https://t.co/example') === comparableXText('Truncated complete text')) throw new Error("快速自检 X 正文比较规则失败");
   const collectionDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-reset-collection-"));
   const collectionPath = path.join(collectionDirectory, "live.json");
