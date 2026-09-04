@@ -2683,7 +2683,13 @@ async function main() {
   assertLiveCollectionComplete(rawInput, args.liveCollection);
   const output = runForecast(rawInput);
   if (output.status === "blocked") {
-    process.stdout.write(`${JSON.stringify({ status: "blocked", output: args.output, wrote_files: false, preserved_existing: hasUsableExistingForecast(args.output), blocked_reasons: output.blocked_reasons })}\n`);
+    const preservedExisting = hasUsableExistingForecast(args.output);
+    let htmlOutput = null;
+    if (!preservedExisting) {
+      writeAtomic(output, args.output);
+      htmlOutput = writeHtmlAtomic(output, args.output);
+    }
+    process.stdout.write(`${JSON.stringify({ status: "blocked", output: args.output, html_output: htmlOutput, wrote_files: !preservedExisting, display_allowed: false, artifact_bundle_verified: !preservedExisting, preserved_existing: preservedExisting, blocked_reasons: output.blocked_reasons })}\n`);
     return;
   }
   writeAtomic(output, args.output);
