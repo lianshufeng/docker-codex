@@ -1,5 +1,5 @@
 master:
-  push:
+  push: &docker_build
     - name: docker-build-and-push-amd64
 
       services:
@@ -98,3 +98,5 @@ master:
             echo "===== BUILD COMPLETE ====="
             echo "docker pull ${IMAGE_LATEST}"
             echo "docker pull ${IMAGE_AMD64}"
+
+  web_trigger_build: *docker_build

@@ -1,0 +1,11 @@
+# 复制为 config.toml 后使用。模型名需与服务端公布的 ID 一致。
+model_provider = "llama_cpp"
+model = "Qwen3.8-27B"
+review_model = "Qwen3.8-27B"
+
+[model_providers.llama_cpp]
+name = "llama.cpp"
+# 将示例地址替换为自己的 llama.cpp 服务地址。
+base_url = "https://llama.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = false

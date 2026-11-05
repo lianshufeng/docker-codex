@@ -17,7 +17,8 @@
 ├── docker-compose.yml
 ├── .env.example
 ├── codex-home/
-│   └── config.toml
+│   ├── .config.toml       # 仓库配置模板
+│   └── config.toml        # 本地配置，由模板复制，Git 忽略
 ├── config/
 │   └── proxy.toml
 ├── skills/
@@ -36,10 +37,13 @@
 
 ## 1. 初始化
 
+首次使用时，从模板生成本地 `config.toml`。下面的命令会保留已有配置。
+
 Linux/macOS：
 
 ```bash
 cp .env.example .env
+[ -e codex-home/config.toml ] || cp codex-home/.config.toml codex-home/config.toml
 docker compose build
 ```
 
@@ -47,6 +51,7 @@ Windows PowerShell：
 
 ```powershell
 Copy-Item .env.example .env
+if (-not (Test-Path codex-home/config.toml)) { Copy-Item codex-home/.config.toml codex-home/config.toml }
 docker compose build
 ```
 

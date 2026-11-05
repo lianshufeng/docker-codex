@@ -1,0 +1,6 @@
+branch:
+  - reg: ^master$
+    buttons:
+      - name: 构建镜像
+        description: 构建并推送 amd64 镜像（latest、amd64 标签）
+        event: web_trigger_build
