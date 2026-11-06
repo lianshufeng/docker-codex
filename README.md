@@ -1,5 +1,7 @@
 # Codex CLI Docker Compose 快速入门
 
+MQTT 服务模式使用独立的 `docker-compose-app-server.yaml`，配置和消息协议见 [app-server 服务说明](app-server/README.md)。原有 CLI 启动方式保持不变。
+
 这个示例用于记录并快速复用 Codex CLI 的常用 Docker 命令，包括：
 
 - ChatGPT Device Code 登录
@@ -15,12 +17,9 @@
 .
 ├── Dockerfile
 ├── docker-compose.yml
-├── .env.example
 ├── codex-home/
 │   ├── .config.toml       # 仓库配置模板
 │   └── config.toml        # 本地配置，由模板复制，Git 忽略
-├── config/
-│   └── proxy.toml
 ├── skills/
 │   └── example-skill/
 │       └── SKILL.md
@@ -31,7 +30,7 @@
 
 | 宿主机 | 容器内 | 用途 |
 |---|---|---|
-| `WORKSPACE_DIR` | `/workspace` | Codex 操作的项目 |
+| `./workspace` | `/workspace` | Codex 操作的项目 |
 | `./codex-home` | `/home/node/.codex` | 配置、认证、历史、日志 |
 | `./skills` | `/home/node/.agents/skills` | 用户级技能 |
 
@@ -42,29 +41,27 @@
 Linux/macOS：
 
 ```bash
-cp .env.example .env
 [ -e codex-home/config.toml ] || cp codex-home/.config.toml codex-home/config.toml
-docker compose build
+docker build -t docker.cnb.cool/vvllm/codex .
 ```
 
 Windows PowerShell：
 
 ```powershell
-Copy-Item .env.example .env
 if (-not (Test-Path codex-home/config.toml)) { Copy-Item codex-home/.config.toml codex-home/config.toml }
-docker compose build
+docker build -t docker.cnb.cool/vvllm/codex .
 ```
 
-默认操作当前目录下的 `workspace`。要操作真实项目，修改 `.env`：
+默认操作当前目录下的 `workspace`。要操作真实项目，直接修改 Compose 中的工作目录挂载：
 
-```dotenv
-WORKSPACE_DIR=/home/you/projects/my-project
+```yaml
+- /home/you/projects/my-project:/workspace
 ```
 
 Windows Docker Desktop 示例：
 
-```dotenv
-WORKSPACE_DIR=C:/Users/you/projects/my-project
+```yaml
+- C:/Users/you/projects/my-project:/workspace
 ```
 
 ## 2. 推荐登录：Device Code
@@ -150,37 +147,32 @@ docker compose run --rm codex login status
 
 这里的“中转”按 OpenAI-compatible API 网关处理，通常使用中转方提供的独立 API Key，而不是把 ChatGPT 的 `auth.json` 交给中转方。
 
-先编辑：
-
-```text
-config/proxy.toml
-```
-
-至少修改：
+在 `codex-home/config.toml` 中配置以下内容，模型名称和地址按中转服务修改；已有配置只修改对应字段，不要重复添加同名字段：
 
 ```toml
+cli_auth_credentials_store = "file"
 model = "中转支持的模型名"
+model_provider = "relay"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
 
 [model_providers.relay]
+name = "OpenAI-compatible relay"
 base_url = "https://你的中转地址/v1"
+env_key = "RELAY_API_KEY"
+wire_api = "responses"
 ```
 
-然后在 `.env` 填写：
-
-```dotenv
-RELAY_API_KEY=你的中转密钥
-```
-
-启动：
+启动时直接传入中转密钥：
 
 ```bash
-docker compose --profile relay run --rm codex-relay
+docker compose run --rm -e RELAY_API_KEY='你的中转密钥' codex
 ```
 
 非交互调用：
 
 ```bash
-docker compose --profile relay run --rm -T codex-relay exec \
+docker compose run --rm -T -e RELAY_API_KEY='你的中转密钥' codex exec \
   "检查当前项目，输出技术栈、启动方式和明显问题"
 ```
 
@@ -257,28 +249,22 @@ docker compose run --rm -T codex exec \
 docker compose run --rm --entrypoint bash codex
 ```
 
-指定不同项目，不修改 `.env`：
+临时挂载另一个项目：
 
 ```bash
-WORKSPACE_DIR=/path/to/project docker compose run --rm codex
+docker compose run --rm -v /path/to/project:/workspace codex
 ```
 
 更新 Codex CLI：
 
 ```bash
-docker compose build --pull --no-cache
+docker build --pull --no-cache -t docker.cnb.cool/vvllm/codex .
 ```
 
 固定 Codex 版本：
 
-```dotenv
-CODEX_VERSION=0.xxx.x
-```
-
-然后重新构建：
-
 ```bash
-docker compose build --no-cache
+docker build --build-arg CODEX_VERSION=0.xxx.x -t docker.cnb.cool/vvllm/codex .
 ```
 
 ## 8. 安全注意事项

@@ -5,3 +5,10 @@ secrets
 workspace
 node_modules
 *.log
+acceptance/.runtime
+acceptance/results
+mosquitto/data
+mosquitto/log
+mosquitto/passwords
+mosquitto/config/passwords
+mosquitto/config/mqtt.json

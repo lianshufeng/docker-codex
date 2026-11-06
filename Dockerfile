@@ -46,6 +46,10 @@ RUN mkdir -p /workspace /home/node/.codex /home/node/.agents/skills \
 ENV CODEX_HOME=/home/node/.codex
 ENV HOME=/home/node
 
+COPY app-server/package*.json /opt/codex-mqtt/
+RUN cd /opt/codex-mqtt && npm ci --omit=dev && npm cache clean --force
+COPY app-server/*.mjs /opt/codex-mqtt/
+
 USER node
 WORKDIR /workspace
 

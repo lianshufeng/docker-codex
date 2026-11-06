@@ -1,0 +1,25 @@
+name: codex-app-server
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: always
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - ./mosquitto/data:/mosquitto/data
+
+  codex-app-server:
+    image: docker.cnb.cool/vvllm/codex:latest
+    restart: always
+    depends_on:
+      mqtt:
+        condition: service_started
+    entrypoint: ["tini", "--", "node", "/opt/codex-mqtt/bridge.mjs"]
+    volumes:
+      - ./mosquitto/config/mqtt.json:/run/secrets/mqtt.json:ro
+      - ./workspace:/workspace
+      - ./codex-home:/home/node/.codex
+      - ./skills:/home/node/.agents/skills:ro
+    stop_grace_period: 10s
