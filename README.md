@@ -2,6 +2,18 @@
 
 MQTT 服务模式使用独立的 `docker-compose-app-server.yaml`，配置和消息协议见 [app-server 服务说明](app-server/README.md)。原有 CLI 启动方式保持不变。
 
+Web 前后端示例位于 [web/](web/README.md)，使用该目录下的 `docker-compose.yml` 启动，与 Codex 共享 workspace，不需要数据库或构建新镜像。
+
+镜像已预装 Node.js Playwright 与 Chromium headless shell，无需在任务中安装浏览器。可直接执行 `playwright screenshot --browser chromium https://example.com screenshot.png`，或通过 `require('playwright')` 使用默认无头浏览器。`codex-home/AGENTS.md` 提供运行说明，随现有目录挂载进入服务；不要将多个工具探测命令的非零退出码误认为浏览器缺失。
+
+常用工具包括 curl、wget、file、zip/unzip、Poppler，以及 Python 的 python-docx、python-pptx、openpyxl、Pillow、requests、BeautifulSoup。PPT 包的安装名是 `python-pptx`，导入名为 `pptx`；Playwright 没有 `fetch` 子命令，静态网页用 curl，动态网页通过 Playwright API 提取。python/python3 与 pip/pip3 统一使用 `/opt/office-venv`，避免登录 Shell 切换 PATH 后使用错误环境。
+
+系统命令补充网络诊断（ping、dig、nslookup、nc、ip、ss）、文件处理（find、tree、du、tar、gzip、zip/unzip）和文本处理（rg、jq、sed、awk、diff、patch、timeout）。不额外安装进程排查工具。网络命令已安装不代表目标站点允许 ICMP 或端口访问，需按实际网络结果判断。
+
+SSH 客户端随镜像预装，包含 ssh、scp、sftp、ssh-keygen、ssh-agent、ssh-add、ssh-keyscan；用于远程连接、文件传输及密钥管理，不安装 SSH 服务端。
+
+镜像工具可在断网环境验收：`docker run --rm -i --network none --entrypoint bash 镜像名 -s < acceptance/tools-smoke.sh`（Linux/macOS Shell）。验收实际创建并读取 Word、Excel、PPT，启动预装浏览器生成截图和 PDF，检查 PDF 提取、渲染及 ZIP 工具。
+
 这个示例用于记录并快速复用 Codex CLI 的常用 Docker 命令，包括：
 
 - ChatGPT Device Code 登录

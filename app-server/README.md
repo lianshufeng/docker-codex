@@ -4,22 +4,22 @@
 
 ## 启动
 
-无需 `.env`，Compose 只挂载凭据文件，不生成或修改账号密码。首次创建 `mosquitto/config/mqtt.json`，填写 MQTT 客户端账号密码（不是 Codex 模型密钥）：
+无需 `.env`，默认账号密码已经配置好，可直接启动。MQTT 客户端账号密码在 `mosquitto/config/mqtt.json`（不是 Codex 模型密钥）：
 
 ```json
 {
-  "username": "default",
-  "password": "替换成你的密码"
+  "username": "admin",
+  "password": "admin@2026"
 }
 ```
 
-Mosquitto 配置放在 `mosquitto/config/`，数据放在 `mosquitto/data/`。用自带命令交互输入同一密码，生成 `mosquitto/config/passwords`：
+Broker 对应的默认密码哈希也已放在 `mosquitto/config/passwords`。默认 topic 前缀为 `codex/admin/`。修改密码时，先修改 JSON，再用以下命令输入同一密码更新 Broker：
 
 ```bash
-docker run --rm -it --mount "type=bind,source=./mosquitto/config,target=/auth" eclipse-mosquitto:2 mosquitto_passwd -c /auth/passwords default
+docker run --rm -it --mount "type=bind,source=./mosquitto/config,target=/auth" eclipse-mosquitto:2 mosquitto_passwd /auth/passwords admin
 ```
 
-`mosquitto/config/mqtt.json` 只读挂载给桥接，`mosquitto/config/` 整个目录只读挂载给 Broker。客户端凭据、密码文件和 `mosquitto/data/` 均已忽略 Git 和构建上下文。用户名同时作为实例 ID，只允许字母、数字、下划线和连字符；更换用户名时也需在密码文件中创建相同账号。确保凭据能分别被 node（UID 1000）和 mosquitto（UID 1883）读取；Linux 宿主机的数据目录需允许 UID 1883 写入。Codex 模型认证仍由 `codex-home/auth.json` 和 `codex-home/config.toml` 管理。
+`mosquitto/config/mqtt.json` 只读挂载给桥接，`mosquitto/config/` 整个目录只读挂载给 Broker。仓库提供的是公开的默认账号密码，部署时请修改，实际密码不要提交 Git。凭据文件仍排除在 Docker 构建上下文之外，`mosquitto/data/` 仍忽略 Git。用户名同时作为实例 ID，只允许字母、数字、下划线和连字符；更换用户名时也需在密码文件中创建相同账号。确保凭据能分别被 node（UID 1000）和 mosquitto（UID 1883）读取；Linux 宿主机的数据目录需允许 UID 1883 写入。Codex 模型认证仍由 `codex-home/auth.json` 和 `codex-home/config.toml` 管理。
 
 默认连接地址 `mqtt://127.0.0.1:1883`，容器内桥接默认连接 `mqtt://mqtt:1883`；仅连接其他 Broker 时在 JSON 中额外填写 `url`。端口和挂载目录在 Compose 对应位置修改。
 
@@ -46,9 +46,9 @@ Mosquitto 镜像由 Compose 的 image 配置。Broker 默认仅映射宿主机�
 
 | Topic | 说明 |
 |---|---|
-| `codex/default/in` | 业务后端发送请求、通知及对 Codex 反向请求的响应 |
-| `codex/default/out` | 桥接发布原始 RPC 消息或桥接错误 |
-| `codex/default/status` | 保留的状态，包含 state、runId、time；异常断线的遗嘱为 offline |
+| `codex/admin/in` | 业务后端发送请求、通知及对 Codex 反向请求的响应 |
+| `codex/admin/out` | 桥接发布原始 RPC 消息或桥接错误 |
+| `codex/admin/status` | 保留的状态，包含 state、runId、time；异常断线的遗嘱为 offline |
 
 先订阅 out 和 status，等待 `state=ready`，保存 runId。桥接独占 initialize/initialized，业务端不要再次初始化。
 

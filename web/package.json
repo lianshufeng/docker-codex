@@ -1,0 +1,30 @@
+{
+  "name": "codex-mqtt-web-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "start": "node server/index.mjs",
+    "dev": "vite --host 0.0.0.0",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "acceptance": "node test/acceptance.mjs"
+  },
+  "dependencies": {
+    "express": "5.1.0",
+    "lucide-react": "0.468.0",
+    "mqtt": "5.15.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-markdown": "10.1.0",
+    "ws": "8.22.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "playwright": "1.64.1",
+    "typescript": "5.9.3",
+    "vite": "7.2.2"
+  }
+}

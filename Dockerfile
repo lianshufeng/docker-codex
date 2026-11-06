@@ -8,6 +8,7 @@ RUN apt-get update \
        bash \
        ca-certificates \
        curl \
+       file \
        fonts-noto-cjk \
        git \
        jq \
@@ -19,6 +20,9 @@ RUN apt-get update \
        python3-venv \
        ripgrep \
        tini \
+       unzip \
+       wget \
+       zip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
@@ -35,10 +39,19 @@ RUN npm install --global "playwright@${PLAYWRIGHT_VERSION}" \
 RUN python3 -m venv /opt/office-venv \
     && /opt/office-venv/bin/pip install --no-cache-dir \
        python-docx==1.2.0 openpyxl==3.1.5 python-pptx==1.0.2 \
+       requests==2.34.2 beautifulsoup4==4.15.0 \
     && printf '#!/bin/sh\nexec /opt/office-venv/bin/python "$@"\n' > /usr/local/bin/python \
     && chmod 755 /usr/local/bin/python \
-    && cp /usr/local/bin/python /usr/local/bin/python3
+    && cp /usr/local/bin/python /usr/local/bin/python3 \
+    && printf '#!/bin/sh\nexec /opt/office-venv/bin/python -m pip "$@"\n' > /usr/local/bin/pip \
+    && chmod 755 /usr/local/bin/pip \
+    && cp /usr/local/bin/pip /usr/local/bin/pip3
 ENV PATH=/opt/office-venv/bin:$PATH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       diffutils dnsutils findutils iproute2 iputils-ping netcat-openbsd patch tree \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace /home/node/.codex /home/node/.agents/skills \
     && chown -R node:node /workspace /home/node/.codex /home/node/.agents

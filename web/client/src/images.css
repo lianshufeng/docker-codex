@@ -1,0 +1,9 @@
+.image-attachments { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px; }
+.image-attachment { position: relative; }
+.image-attachment img { display: block; width: 88px; height: 88px; object-fit: cover; border-radius: 9px; }
+.image-attachment button { position: absolute; right: -5px; top: -5px; border: 1px solid #555; border-radius: 50%; background: #222; color: white; width: 23px; height: 23px; display: grid; place-items: center; }
+.message-images { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.message-images img { max-width: min(260px, 100%); max-height: 220px; object-fit: contain; border-radius: 9px; }
+.reply-image { display: inline-block; max-width: 100%; margin: 8px 0; }
+.reply-image img { display: block; max-width: 100%; max-height: 520px; object-fit: contain; border: 1px solid #444; border-radius: 9px; }
+.reply-image span { color: #aaa; font-size: 12px; }

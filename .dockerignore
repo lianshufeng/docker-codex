@@ -5,6 +5,10 @@ secrets
 workspace
 node_modules
 *.log
+web/data
+web/dist
+web/test-results
+web/node_modules
 acceptance/.runtime
 acceptance/results
 mosquitto/data

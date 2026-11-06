@@ -1,0 +1,17 @@
+name: codex-web
+
+services:
+  web:
+    image: node:24-bookworm-slim
+    restart: always
+    init: true
+    user: node
+    working_dir: /app
+    command: node start.mjs
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./:/app
+      - ../workspace:/workspace
