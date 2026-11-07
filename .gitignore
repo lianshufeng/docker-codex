@@ -28,3 +28,6 @@ codex-reset-forecast.json
 /codex.html
 /open-codex.cmd
 /codex-local-server.mjs
+
+# 临时目录
+/tmp
