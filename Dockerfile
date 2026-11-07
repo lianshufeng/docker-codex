@@ -1,7 +1,8 @@
-ARG NODE_IMAGE=node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
+ARG NODE_IMAGE=node:24-bookworm-slim
 FROM ${NODE_IMAGE}
 
 ARG CODEX_VERSION=latest
+ARG LIBREOFFICE_VERSION=4:7.4.7-1+deb12u14
 ARG PLAYWRIGHT_VERSION=1.65.0
 
 RUN apt-get update \
@@ -14,6 +15,9 @@ RUN apt-get update \
        git \
        jq \
        less \
+       libreoffice-calc-nogui=${LIBREOFFICE_VERSION} \
+       libreoffice-impress-nogui=${LIBREOFFICE_VERSION} \
+       libreoffice-writer-nogui=${LIBREOFFICE_VERSION} \
        openssh-client \
        poppler-utils \
        python-is-python3 \

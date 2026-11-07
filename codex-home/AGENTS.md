@@ -8,6 +8,7 @@
 - 不要把 which 同时检测多个可选工具时的非零退出码视为浏览器缺失。先实际运行已有浏览器，并根据具体错误处理；浏览器网络访问失败也不意味着需要安装浏览器。
 - 工作文件保存在当前项目目录；给用户展示图片时，回复使用 Markdown 图片及实际项目路径。
 - 办公库已经预装：PPT 使用 from pptx import Presentation（安装包名是 python-pptx，不是 pptx），Word 使用 python-docx/docx，Excel 使用 openpyxl；图片处理使用 Pillow/PIL。不要重复安装或新建空虚拟环境绕过这些库。
+- LibreOffice Writer、Calc、Impress 无界面版已预装，可用 `soffice --headless --convert-to pdf --outdir OUTPUT INPUT` 渲染常见办公文档，再用 `pdftoppm -png INPUT.pdf PREFIX` 导出页面图片。内容提取优先用已有 Python 办公库；扫描件 OCR 不在预装范围内。
 - 静态网页使用 curl -fL --max-time 30 URL -o output.html；动态网页使用 Playwright 的 page.goto、page.content 或 locator 提取内容。Playwright CLI 没有 fetch 子命令。
 - Python 网页请求与解析使用预装 requests、BeautifulSoup（bs4）。PDF 使用 pdfinfo、pdftotext、pdftoppm。file、wget、zip、unzip 也已预装。
 - 网络诊断已有 ping、dig、nslookup、nc、ip、ss；文件与文本处理已有 find、tree、du、tar、gzip、rg、jq、sed、awk、diff、patch、timeout。无需为这些命令现场安装软件；远程网络超时或 ICMP 被拦截不代表命令缺失。

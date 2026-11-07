@@ -2,7 +2,7 @@
 set -euo pipefail
 # Run inside the image as its default node user, with --network none.
 test "$(id -u)" = 1000
-for tool in curl wget ssh scp sftp ssh-keygen ssh-agent ssh-add ssh-keyscan file zip unzip tar gzip find tree du rg jq sed awk diff patch timeout ping dig nslookup nc ip ss pdfinfo pdftotext pdftoppm playwright; do command -v "$tool" >/dev/null; done
+for tool in curl wget ssh scp sftp ssh-keygen ssh-agent ssh-add ssh-keyscan file zip unzip tar gzip find tree du rg jq sed awk diff patch timeout ping dig nslookup nc ip ss pdfinfo pdftotext pdftoppm playwright soffice; do command -v "$tool" >/dev/null; done
 ssh -V
 ping -c 1 -W 2 127.0.0.1 >/dev/null
 ip link show lo >/dev/null
@@ -40,6 +40,22 @@ assert BeautifulSoup('<h1>中文网页验收</h1>', 'html.parser').h1.get_text()
 assert requests.Request('GET', 'https://example.com').prepare().url == 'https://example.com/'
 print('PASS Office / Pillow / requests / BeautifulSoup')
 PY
+mkdir word-pdf ppt-pdf sheet-pdf office-images
+soffice --headless -env:UserInstallation="file://$testdir/lo-profile" --convert-to pdf --outdir word-pdf sample.docx
+soffice --headless -env:UserInstallation="file://$testdir/lo-profile" --convert-to pdf --outdir ppt-pdf sample.pptx
+soffice --headless -env:UserInstallation="file://$testdir/lo-profile" --convert-to pdf --outdir sheet-pdf sample.xlsx
+pdftotext word-pdf/sample.pdf word.txt
+pdftotext ppt-pdf/sample.pdf ppt.txt
+pdftotext sheet-pdf/sample.pdf sheet.txt
+grep -q '中文办公验收' word.txt
+grep -q '中文演示验收' ppt.txt
+grep -q '中文表格验收' sheet.txt
+for name in word ppt sheet; do
+  source="$name-pdf/sample.pdf"
+  pdftoppm -f 1 -singlefile -png "$source" "office-images/$name" >/dev/null 2>&1
+  test -s "office-images/$name.png"
+done
+echo 'PASS LibreOffice Word / Excel / PowerPoint PDF and page image conversion'
 node <<'JS'
 const { chromium } = require('playwright');
 (async () => {
