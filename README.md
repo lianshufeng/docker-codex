@@ -71,13 +71,13 @@ Web 前后端示例位于 [web/](web/README.md)，使用该目录下的 `docker-
 
 镜像已预装 Node.js Playwright 与 Chromium headless shell，无需在任务中安装浏览器。可直接执行 `playwright screenshot --browser chromium https://example.com screenshot.png`，或通过 `require('playwright')` 使用默认无头浏览器。`codex-home/AGENTS.md` 提供运行说明，随现有目录挂载进入服务；不要将多个工具探测命令的非零退出码误认为浏览器缺失。
 
-常用工具包括 curl、wget、file、zip/unzip、Poppler，以及 Python 的 python-docx、python-pptx、openpyxl、Pillow、requests、BeautifulSoup。LibreOffice Writer、Calc、Impress 无界面版可将常见 Word、Excel、PPT 文档转成 PDF，再用 `pdftoppm` 按页导出图片；结构化内容提取优先使用 Python 办公库，扫描件 OCR 不在当前镜像范围内。PPT 包的安装名是 `python-pptx`，导入名为 `pptx`；Playwright 没有 `fetch` 子命令，静态网页用 curl，动态网页通过 Playwright API 提取。python/python3 与 pip/pip3 统一使用 `/opt/office-venv`，避免登录 Shell 切换 PATH 后使用错误环境。
+常用工具包括 curl、wget、file、zip/unzip、Poppler，以及 Python 的 python-docx、python-pptx、openpyxl、Pillow、requests、BeautifulSoup。LibreOffice Writer、Calc、Impress 无界面版可将常见 Word、Excel、PPT 文档转成 PDF，再用 `pdftoppm` 按页导出图片；结构化内容提取优先使用 Python 办公库，扫描件 OCR 不在当前镜像范围内。镜像还预装单个 `ffmpeg` 可执行文件，可读取视频、按时间抽帧并制作联系表；不含 `ffplay`、`ffprobe`。PPT 包的安装名是 `python-pptx`，导入名为 `pptx`；Playwright 没有 `fetch` 子命令，静态网页用 curl，动态网页通过 Playwright API 提取。python/python3 与 pip/pip3 统一使用 `/opt/office-venv`，避免登录 Shell 切换 PATH 后使用错误环境。
 
 系统命令补充网络诊断（ping、dig、nslookup、nc、ip、ss）、文件处理（find、tree、du、tar、gzip、zip/unzip）和文本处理（rg、jq、sed、awk、diff、patch、timeout）。不额外安装进程排查工具。网络命令已安装不代表目标站点允许 ICMP 或端口访问，需按实际网络结果判断。
 
 SSH 客户端随镜像预装，包含 ssh、scp、sftp、ssh-keygen、ssh-agent、ssh-add、ssh-keyscan；用于远程连接、文件传输及密钥管理，不安装 SSH 服务端。
 
-镜像工具可在断网环境验收：`docker run --rm -i --network none --entrypoint bash 镜像名 -s < acceptance/tools-smoke.sh`（Linux/macOS Shell）。验收实际创建并读取 Word、Excel、PPT，使用 LibreOffice 转换三类办公文档并逐页生成图片，启动预装浏览器生成截图和 PDF，检查 PDF 提取、渲染及 ZIP 工具。
+镜像工具可在断网环境验收：`docker run --rm -i --network none --entrypoint bash 镜像名 -s < acceptance/tools-smoke.sh`（Linux/macOS Shell）。验收实际创建并读取 Word、Excel、PPT，使用 LibreOffice 转换三类办公文档并逐页生成图片，使用 FFmpeg 生成短视频并抽帧，启动预装浏览器生成截图和 PDF，检查 PDF 提取、渲染及 ZIP 工具。
 
 这个示例用于记录并快速复用 Codex CLI 的常用 Docker 命令，包括：
 

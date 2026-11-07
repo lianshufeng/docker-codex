@@ -71,7 +71,7 @@ The standalone CLI uses the root `docker-compose-cli.yaml`; specify it with `-f`
 
 Playwright and Chromium headless shell are preinstalled. Use `playwright screenshot --browser chromium https://example.com screenshot.png` or `require('playwright')`. Runtime instructions are mounted from `codex-home/AGENTS.md`. Read each tool's result separately when diagnosing failures.
 
-The image includes curl, wget, file, zip/unzip, Poppler, and Python libraries for Word, PowerPoint, Excel, images, HTTP, and HTML parsing. Headless LibreOffice Writer, Calc, and Impress can convert common Word, Excel, and PowerPoint documents to PDF; `pdftoppm` can then export each page as an image. Use the Python office libraries for structured content extraction. OCR for scanned documents is not included. Install names and import names can differ, such as `python-pptx` and `pptx`. Static pages can be fetched with curl, and dynamic pages read through Playwright. Python and pip aliases consistently use `/opt/office-venv`, including in login shells.
+The image includes curl, wget, file, zip/unzip, Poppler, and Python libraries for Word, PowerPoint, Excel, images, HTTP, and HTML parsing. Headless LibreOffice Writer, Calc, and Impress can convert common Word, Excel, and PowerPoint documents to PDF; `pdftoppm` can then export each page as an image. Use the Python office libraries for structured content extraction. OCR for scanned documents is not included. A single `ffmpeg` executable is also included for reading videos, extracting frames, and creating contact sheets; `ffplay` and `ffprobe` are omitted. Install names and import names can differ, such as `python-pptx` and `pptx`. Static pages can be fetched with curl, and dynamic pages read through Playwright. Python and pip aliases consistently use `/opt/office-venv`, including in login shells.
 
 Network tools include ping, dig, nslookup, nc, ip, and ss. File and text tools include find, tree, du, tar, gzip, rg, jq, sed, awk, diff, patch, and timeout. Network access depends on the destination and host environment. SSH client tools include ssh, scp, sftp, ssh-keygen, ssh-agent, ssh-add, and ssh-keyscan.
 
@@ -81,7 +81,7 @@ Run the offline tool smoke test from a Linux/macOS shell:
 docker run --rm -i --network none --entrypoint bash IMAGE -s < acceptance/tools-smoke.sh
 ```
 
-It creates and reads office files, converts Word, Excel, and PowerPoint documents to PDFs and page images with LibreOffice, captures a browser screenshot and PDF, and checks PDF extraction, rendering, and ZIP tools.
+It creates and reads office files, converts Word, Excel, and PowerPoint documents to PDFs and page images with LibreOffice, creates a short video and extracts a frame with FFmpeg, captures a browser screenshot and PDF, and checks PDF extraction, rendering, and ZIP tools.
 
 ### Initialize and mount directories
 

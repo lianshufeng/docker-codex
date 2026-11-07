@@ -2,7 +2,10 @@
 set -euo pipefail
 # Run inside the image as its default node user, with --network none.
 test "$(id -u)" = 1000
-for tool in curl wget ssh scp sftp ssh-keygen ssh-agent ssh-add ssh-keyscan file zip unzip tar gzip find tree du rg jq sed awk diff patch timeout ping dig nslookup nc ip ss pdfinfo pdftotext pdftoppm playwright soffice; do command -v "$tool" >/dev/null; done
+for tool in curl wget ssh scp sftp ssh-keygen ssh-agent ssh-add ssh-keyscan file zip unzip tar gzip find tree du rg jq sed awk diff patch timeout ping dig nslookup nc ip ss pdfinfo pdftotext pdftoppm playwright soffice ffmpeg; do command -v "$tool" >/dev/null; done
+test "$(command -v ffmpeg)" = /usr/local/bin/ffmpeg
+! command -v ffplay >/dev/null
+! command -v ffprobe >/dev/null
 ssh -V
 ping -c 1 -W 2 127.0.0.1 >/dev/null
 ip link show lo >/dev/null
@@ -56,6 +59,12 @@ for name in word ppt sheet; do
   test -s "office-images/$name.png"
 done
 echo 'PASS LibreOffice Word / Excel / PowerPoint PDF and page image conversion'
+ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=size=64x64:rate=2 -t 1 -c:v mpeg4 sample.avi
+mkdir video-frames
+ffmpeg -hide_banner -loglevel error -i sample.avi -vf fps=1 video-frames/frame-%02d.png
+test -s video-frames/frame-01.png
+file sample.avi video-frames/frame-01.png
+echo 'PASS FFmpeg video creation and frame extraction'
 node <<'JS'
 const { chromium } = require('playwright');
 (async () => {

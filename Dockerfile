@@ -1,4 +1,22 @@
 ARG NODE_IMAGE=node:24-bookworm-slim
+ARG FFMPEG_VERSION=master-latest-linux64-gpl
+
+FROM ${NODE_IMAGE} AS ffmpeg
+ARG FFMPEG_VERSION
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o "/tmp/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+    && curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256" -o /tmp/checksums.sha256 \
+    && cd /tmp \
+    && test "$(grep -Fc "  ffmpeg-${FFMPEG_VERSION}.tar.xz" checksums.sha256)" -eq 1 \
+    && grep -F "  ffmpeg-${FFMPEG_VERSION}.tar.xz" checksums.sha256 > ffmpeg-checksum.sha256 \
+    && sha256sum --check --strict ffmpeg-checksum.sha256 \
+    && tar -xJf "ffmpeg-${FFMPEG_VERSION}.tar.xz" --no-same-owner --strip-components=2 --wildcards -C /usr/local/bin '*/bin/ffmpeg' \
+    && chmod 755 /usr/local/bin/ffmpeg \
+    && rm -f "/tmp/ffmpeg-${FFMPEG_VERSION}.tar.xz" /tmp/checksums.sha256 /tmp/ffmpeg-checksum.sha256
+
 FROM ${NODE_IMAGE}
 
 ARG CODEX_VERSION=latest
@@ -67,6 +85,8 @@ ENV HOME=/home/node
 COPY app-server/package*.json /opt/codex-mqtt/
 RUN cd /opt/codex-mqtt && npm ci --omit=dev && npm cache clean --force
 COPY app-server/*.mjs /opt/codex-mqtt/
+
+COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 
 USER node
 WORKDIR /workspace
