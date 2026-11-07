@@ -18,6 +18,7 @@ services:
         condition: service_started
     entrypoint: ["tini", "--", "node", "/opt/codex-mqtt/bridge.mjs"]
     volumes:
+      - ./tmp:/tmp
       - ./mosquitto/config/mqtt.json:/run/secrets/mqtt.json:ro
       - ./workspace:/workspace
       - ./codex-home:/home/node/.codex
