@@ -1,4 +1,69 @@
-# Codex CLI Docker Compose 快速入门
+# Docker Codex · AI 助手与 MQTT 接入
+
+简体中文 · [English](README.en.md)
+
+用 Docker Compose 运行 Codex，让它在你的项目目录里执行命令、修改代码、生成文件。可以在浏览器里用 **AI 助手** 发任务、查看进度和下载成果，也可以让自己的后端通过 **MQTT** 调用 Codex。
+
+## 效果图
+
+**项目与会话** · 每个账号可以创建多个项目，一个项目下可以开多个会话。
+
+![AI 助手工作台，左侧展示多个项目和会话](docs/screenshots/workspace.png)
+
+**聊天与成果** · 在同一页面查看任务回复和生成的文件，可直接下载。
+
+![AI 助手显示发布清单及可下载的项目文件](docs/screenshots/files.png)
+
+<details>
+<summary>查看登录界面</summary>
+
+![AI 助手登录页，支持创建账号](docs/screenshots/login.png)
+
+</details>
+
+## 快速启动
+
+需要 Docker 和 Docker Compose。以下命令都在仓库根目录执行。
+
+### 1. 启动 Codex app-server + MQTT
+
+```bash
+docker compose -f docker-compose-app-server.yaml up -d
+```
+
+首次使用且尚未配置模型认证时，可以用设备码登录。按终端提示在浏览器完成授权，然后重启 app-server 以加载认证。
+
+```bash
+docker compose run --rm codex login --device-auth
+docker compose -f docker-compose-app-server.yaml restart codex-app-server
+```
+
+只做后端集成，到这一步即可。宿主机可通过 `mqtt://127.0.0.1:1883` 连接 Broker。实际执行任务需要可用的模型和认证。默认 MQTT 账号用于本地试用，部署前请更换。 [MQTT 配置与协议](app-server/README.md)
+
+### 2. 启动 Web（AI 助手）
+
+保持上一步的服务运行，再执行：
+
+```bash
+docker compose -f web/docker-compose.yml up -d
+```
+
+首次启动会安装锁定的依赖并构建前端。打开 [http://localhost:3000](http://localhost:3000)，注册账号，然后按 **新建项目 → 新会话 → 发送消息** 试用。可以发「生成一份三条待办的发布清单，保存为 launch-checklist.md」，再点右上角 **文件** 查看并下载成果。 [Web 配置与验收](web/README.md)
+
+## 功能与工作原理
+
+- **多用户、多项目、多会话**。每个账号管理自己的项目。项目内的各个会话有独立历史，共享该项目的文件。
+- **任务与文件**。支持流式回复、追加要求、停止任务、粘贴图片、预览回复图片，以及浏览、下载和删除项目文件。Web 默认允许所有用户合计运行 4 个任务，同一会话同时运行 1 个任务。
+- **部署方式**。Web 和 Codex 共用宿主机的 `workspace/`，Web 使用现成的 Node.js 镜像和文件存储。所有账号共享一个 app-server 和运行身份，适用于可信用户的示例环境。
+
+浏览器通过 HTTP 和 WebSocket 连接 Web 后端。业务后端通过 MQTT 与桥接进程通信，桥接进程再通过标准输入和输出与 Codex app-server 交换 JSON-RPC 消息。MQTT 凭据由业务后端持有。
+
+接入时，先订阅 `codex/admin/status` 和 `codex/admin/out`，等状态为 `ready` 后，用当前 `runId` 向 `codex/admin/in` 发送请求，例如 `thread/start` 或 `turn/start`，再从 `out` 读取响应和流式事件。 [本仓库 MQTT 信封与主题](app-server/README.md#协议) · [OpenAI 官方 Codex App Server API 文档](https://developers.openai.com/codex/app-server)
+
+<details>
+<summary>展开 Codex CLI、镜像工具与高级配置</summary>
+
+## Codex CLI 参考
 
 MQTT 服务模式使用独立的 `docker-compose-app-server.yaml`，配置和消息协议见 [app-server 服务说明](app-server/README.md)。原有 CLI 启动方式保持不变。
 
@@ -273,7 +338,7 @@ docker compose run --rm -v /path/to/project:/workspace codex
 docker build --pull --no-cache -t docker.cnb.cool/vvllm/codex .
 ```
 
-固定 Codex 版本：
+Dockerfile 顶部集中维护基础镜像和 Playwright 的固定值，Codex 默认使用 `latest` 跟随 npm 最新正式版。Python 依赖固定版本维护在 [requirements.txt](requirements.txt)。重建时需重新执行 Codex 安装层才能获取新版，已有镜像不会自动更新。临时指定 Codex 版本可用：
 
 ```bash
 docker build --build-arg CODEX_VERSION=0.xxx.x -t docker.cnb.cool/vvllm/codex .
@@ -306,3 +371,5 @@ docker compose run --rm -T --interactive=false codex --sandbox danger-full-acces
 其中 `-T --interactive=false` 禁用终端交互，`--ask-for-approval never` 禁用审批提示，`--skip-git-repo-check` 允许在非 Git 仓库中执行任务。
 
 这会关闭 Codex 在容器内部的额外沙箱，不等于关闭 Docker 隔离，但会让 Codex 能访问容器内所有已挂载内容，因此不要挂载无关敏感目录。
+
+</details>

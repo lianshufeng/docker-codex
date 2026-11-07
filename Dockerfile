@@ -1,7 +1,8 @@
-FROM node:24-bookworm-slim
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
+FROM ${NODE_IMAGE}
 
 ARG CODEX_VERSION=latest
-ARG PLAYWRIGHT_VERSION=1.64.1
+ARG PLAYWRIGHT_VERSION=1.65.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -36,10 +37,10 @@ RUN npm install --global "playwright@${PLAYWRIGHT_VERSION}" \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
+COPY requirements.txt /tmp/requirements.txt
+
 RUN python3 -m venv /opt/office-venv \
-    && /opt/office-venv/bin/pip install --no-cache-dir \
-       python-docx==1.2.0 openpyxl==3.1.5 python-pptx==1.0.2 \
-       requests==2.34.2 beautifulsoup4==4.15.0 \
+    && /opt/office-venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
     && printf '#!/bin/sh\nexec /opt/office-venv/bin/python "$@"\n' > /usr/local/bin/python \
     && chmod 755 /usr/local/bin/python \
     && cp /usr/local/bin/python /usr/local/bin/python3 \
