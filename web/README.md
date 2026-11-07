@@ -7,7 +7,7 @@ React 前端和 Node.js 服务端位于本目录，复用现有 MQTT 桥接与�
 先在仓库根目录启动 Codex 和 Broker：
 
 ```bash
-docker compose -f docker-compose-app-server.yaml up -d
+docker compose -f docker-compose.yaml up -d
 ```
 
 再启动 Web：

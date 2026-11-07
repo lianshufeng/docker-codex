@@ -28,14 +28,14 @@
 ### 1. 启动 Codex app-server + MQTT
 
 ```bash
-docker compose -f docker-compose-app-server.yaml up -d
+docker compose -f docker-compose.yaml up -d
 ```
 
 首次使用且尚未配置模型认证时，可以用设备码登录。按终端提示在浏览器完成授权，然后重启 app-server 以加载认证。
 
 ```bash
-docker compose run --rm codex login --device-auth
-docker compose -f docker-compose-app-server.yaml restart codex-app-server
+docker compose -f docker-compose-cli.yaml run --rm codex login --device-auth
+docker compose -f docker-compose.yaml restart codex-app-server
 ```
 
 只做后端集成，到这一步即可。宿主机可通过 `mqtt://127.0.0.1:1883` 连接 Broker。实际执行任务需要可用的模型和认证。默认 MQTT 账号用于本地试用，部署前请更换。 [MQTT 配置与协议](app-server/README.md)
@@ -65,7 +65,7 @@ docker compose -f web/docker-compose.yml up -d
 
 ## Codex CLI 参考
 
-MQTT 服务模式使用独立的 `docker-compose-app-server.yaml`，配置和消息协议见 [app-server 服务说明](app-server/README.md)。原有 CLI 启动方式保持不变。
+独立 CLI 使用根目录 `docker-compose-cli.yaml`，命令需通过 `-f` 指定该文件。MQTT 服务模式使用默认的 `docker-compose.yaml`，配置和消息协议见 [app-server 服务说明](app-server/README.md)。
 
 Web 前后端示例位于 [web/](web/README.md)，使用该目录下的 `docker-compose.yml` 启动，与 Codex 共享 workspace，不需要数据库或构建新镜像。
 
@@ -93,7 +93,8 @@ SSH 客户端随镜像预装，包含 ssh、scp、sftp、ssh-keygen、ssh-agent�
 ```text
 .
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yaml         # 默认的 app-server + MQTT 服务
+├── docker-compose-cli.yaml     # 独立 CLI
 ├── codex-home/
 │   ├── .config.toml       # 仓库配置模板
 │   └── config.toml        # 本地配置，由模板复制，Git 忽略
@@ -146,7 +147,7 @@ Windows Docker Desktop 示例：
 容器或远程环境优先使用 Device Code：
 
 ```bash
-docker compose run --rm codex login --device-auth
+docker compose -f docker-compose-cli.yaml run --rm codex login --device-auth
 ```
 
 浏览器完成授权后，凭据会写入：
@@ -158,13 +159,13 @@ docker compose run --rm codex login --device-auth
 检查登录状态：
 
 ```bash
-docker compose run --rm codex login status
+docker compose -f docker-compose-cli.yaml run --rm codex login status
 ```
 
 启动交互式 Codex：
 
 ```bash
-docker compose run --rm codex
+docker compose -f docker-compose-cli.yaml run --rm codex
 ```
 
 ## 3. 使用宿主机已有的 auth.json
@@ -177,7 +178,7 @@ Linux/macOS：
 mkdir -p codex-home
 cp ~/.codex/auth.json ./codex-home/auth.json
 chmod 600 ./codex-home/auth.json
-docker compose run --rm codex login status
+docker compose -f docker-compose-cli.yaml run --rm codex login status
 ```
 
 Windows PowerShell：
@@ -185,10 +186,10 @@ Windows PowerShell：
 ```powershell
 New-Item -ItemType Directory -Force codex-home
 Copy-Item "$HOME\.codex\auth.json" ".\codex-home\auth.json"
-docker compose run --rm codex login status
+docker compose -f docker-compose-cli.yaml run --rm codex login status
 ```
 
-也可以只挂载单个文件。先创建 `secrets/auth.json`，再取消 `docker-compose.yml` 中这行注释：
+也可以只挂载单个文件。先创建 `secrets/auth.json`，再取消 `docker-compose-cli.yaml` 中这行注释：
 
 ```yaml
 - ./secrets/auth.json:/home/node/.codex/auth.json
@@ -203,7 +204,7 @@ Linux/macOS：
 ```bash
 export OPENAI_API_KEY='你的密钥'
 printf '%s' "$OPENAI_API_KEY" \
-  | docker compose run --rm -T -e OPENAI_API_KEY codex login --with-api-key
+  | docker compose -f docker-compose-cli.yaml run --rm -T -e OPENAI_API_KEY codex login --with-api-key
 ```
 
 Windows PowerShell：
@@ -211,13 +212,13 @@ Windows PowerShell：
 ```powershell
 $env:OPENAI_API_KEY='你的密钥'
 $env:OPENAI_API_KEY |
-  docker compose run --rm -T -e OPENAI_API_KEY codex login --with-api-key
+  docker compose -f docker-compose-cli.yaml run --rm -T -e OPENAI_API_KEY codex login --with-api-key
 ```
 
 检查：
 
 ```bash
-docker compose run --rm codex login status
+docker compose -f docker-compose-cli.yaml run --rm codex login status
 ```
 
 ## 5. 使用中转/API 网关
@@ -243,13 +244,13 @@ wire_api = "responses"
 启动时直接传入中转密钥：
 
 ```bash
-docker compose run --rm -e RELAY_API_KEY='你的中转密钥' codex
+docker compose -f docker-compose-cli.yaml run --rm -e RELAY_API_KEY='你的中转密钥' codex
 ```
 
 非交互调用：
 
 ```bash
-docker compose run --rm -T -e RELAY_API_KEY='你的中转密钥' codex exec \
+docker compose -f docker-compose-cli.yaml run --rm -T -e RELAY_API_KEY='你的中转密钥' codex exec \
   "检查当前项目，输出技术栈、启动方式和明显问题"
 ```
 
@@ -304,32 +305,32 @@ $example-skill 检查当前项目
 查看版本：
 
 ```bash
-docker compose run --rm codex --version
+docker compose -f docker-compose-cli.yaml run --rm codex --version
 ```
 
 交互式运行：
 
 ```bash
-docker compose run --rm codex
+docker compose -f docker-compose-cli.yaml run --rm codex
 ```
 
 一次性执行任务：
 
 ```bash
-docker compose run --rm -T codex exec \
+docker compose -f docker-compose-cli.yaml run --rm -T codex exec \
   "阅读项目并生成一份中文架构说明"
 ```
 
 进入容器 Shell：
 
 ```bash
-docker compose run --rm --entrypoint bash codex
+docker compose -f docker-compose-cli.yaml run --rm --entrypoint bash codex
 ```
 
 临时挂载另一个项目：
 
 ```bash
-docker compose run --rm -v /path/to/project:/workspace codex
+docker compose -f docker-compose-cli.yaml run --rm -v /path/to/project:/workspace codex
 ```
 
 更新 Codex CLI：
@@ -359,13 +360,13 @@ Codex 自身还会使用文件系统沙箱。若宿主机内核不允许容器�
 在确认容器本身只挂载了可信目录后，可临时测试：
 
 ```bash
-docker compose run --rm codex --sandbox danger-full-access
+docker compose -f docker-compose-cli.yaml run --rm codex --sandbox danger-full-access
 ```
 
 完整的非交互调用示例：
 
 ```bash
-docker compose run --rm -T --interactive=false codex --sandbox danger-full-access --ask-for-approval never exec --skip-git-repo-check "ping"
+docker compose -f docker-compose-cli.yaml run --rm -T --interactive=false codex --sandbox danger-full-access --ask-for-approval never exec --skip-git-repo-check "ping"
 ```
 
 其中 `-T --interactive=false` 禁用终端交互，`--ask-for-approval never` 禁用审批提示，`--skip-git-repo-check` 允许在非 Git 仓库中执行任务。

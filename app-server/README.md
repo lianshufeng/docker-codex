@@ -1,6 +1,6 @@
 # Codex app-server MQTT 服务
 
-服务由独立 Mosquitto Broker 和 Codex 容器组成，Codex 容器内的桥接进程管理一个 app-server 子进程。现有 CLI Compose 保持不变。用户与线程 ID 的对应关系由业务后端维护。
+服务由独立 Mosquitto Broker 和 Codex 容器组成，Codex 容器内的桥接进程管理一个 app-server 子进程。独立 CLI Compose 位于根目录 `docker-compose-cli.yaml`。用户与线程 ID 的对应关系由业务后端维护。
 
 ## 启动
 
@@ -26,14 +26,14 @@ docker run --rm -it --mount "type=bind,source=./mosquitto/config,target=/auth" e
 服务 Compose 直接使用固定路径和配置值，不读取环境变量作为默认值；验收脚本另行生成隔离测试配置，不修改部署文件。
 
 ```bash
-docker compose -f docker-compose-app-server.yaml up -d
-docker compose -f docker-compose-app-server.yaml logs -f codex-app-server
+docker compose -f docker-compose.yaml up -d
+docker compose -f docker-compose.yaml logs -f codex-app-server
 ```
 
 修改两个凭据文件后重新创建服务以重新加载挂载文件：
 
 ```bash
-docker compose -f docker-compose-app-server.yaml up -d --force-recreate
+docker compose -f docker-compose.yaml up -d --force-recreate
 ```
 
 服务模式挂载的 CODEX_HOME 与 CLI 相同，可先按根 README 完成登录。启动与线程查询无需调用模型，实际任务需要有效认证及可用模型。桥接不会关闭 Codex 沙箱或审批策略。
@@ -134,7 +134,7 @@ node app-server/test/acceptance.mjs
 停止服务：
 
 ```bash
-docker compose -f docker-compose-app-server.yaml down
+docker compose -f docker-compose.yaml down
 ```
 
 停止服务会保留宿主机 `mosquitto/data/` 中的数据。

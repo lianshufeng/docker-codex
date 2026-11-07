@@ -1,4 +1,4 @@
-// Run after starting docker-compose-app-server.yaml; uses no model credentials.
+// Run after starting docker-compose.yaml; uses no model credentials.
 import mqtt from 'mqtt';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 const instance = process.env.CODEX_INSTANCE_ID || 'default';
 const base = `codex/${instance}`;
-const compose = ['compose', '-f', 'docker-compose-app-server.yaml'];
+const compose = ['compose', '-f', 'docker-compose.yaml'];
 const events = [];
 let state;
 const client = await mqtt.connectAsync(process.env.MQTT_URL || 'mqtt://127.0.0.1:1883', {

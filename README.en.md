@@ -28,14 +28,14 @@ You need Docker and Docker Compose. Run these commands from the repository root.
 ### 1. Start Codex app-server and MQTT
 
 ```bash
-docker compose -f docker-compose-app-server.yaml up -d
+docker compose -f docker-compose.yaml up -d
 ```
 
 If you haven't configured model credentials yet, you can sign in using a device code. Follow the terminal instructions to authorize in your browser, then restart app-server to load the credentials.
 
 ```bash
-docker compose run --rm codex login --device-auth
-docker compose -f docker-compose-app-server.yaml restart codex-app-server
+docker compose -f docker-compose-cli.yaml run --rm codex login --device-auth
+docker compose -f docker-compose.yaml restart codex-app-server
 ```
 
 For a backend-only integration, stop here. Connect to the broker at `mqtt://127.0.0.1:1883` from the host. Running tasks requires a working model and credentials. The default MQTT account is for local trials. Replace it before deployment. [MQTT configuration and protocol (Chinese)](app-server/README.md)
@@ -65,7 +65,7 @@ Subscribe to `codex/admin/status` and `codex/admin/out`. Once the state is `read
 
 ## Codex CLI reference
 
-The standalone CLI uses the root `docker-compose.yml`. MQTT mode uses `docker-compose-app-server.yaml`, and Web uses `web/docker-compose.yml`.
+The standalone CLI uses the root `docker-compose-cli.yaml`; specify it with `-f` when running CLI commands. MQTT mode uses the default root `docker-compose.yaml`, and Web uses `web/docker-compose.yml`.
 
 ### Image tools
 
@@ -114,9 +114,9 @@ To work on another host project, change the workspace volume to `/home/you/proje
 Device-code login is suitable for containers and remote hosts:
 
 ```bash
-docker compose run --rm codex login --device-auth
-docker compose run --rm codex login status
-docker compose run --rm codex
+docker compose -f docker-compose-cli.yaml run --rm codex login --device-auth
+docker compose -f docker-compose-cli.yaml run --rm codex login status
+docker compose -f docker-compose-cli.yaml run --rm codex
 ```
 
 Credentials are persisted in `codex-home/auth.json`. You can copy an existing file.
@@ -144,14 +144,14 @@ Linux/macOS:
 
 ```bash
 export OPENAI_API_KEY='YOUR_KEY'
-printf '%s' "$OPENAI_API_KEY" | docker compose run --rm -T -e OPENAI_API_KEY codex login --with-api-key
+printf '%s' "$OPENAI_API_KEY" | docker compose -f docker-compose-cli.yaml run --rm -T -e OPENAI_API_KEY codex login --with-api-key
 ```
 
 PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY='YOUR_KEY'
-$env:OPENAI_API_KEY | docker compose run --rm -T -e OPENAI_API_KEY codex login --with-api-key
+$env:OPENAI_API_KEY | docker compose -f docker-compose-cli.yaml run --rm -T -e OPENAI_API_KEY codex login --with-api-key
 ```
 
 ### OpenAI-compatible gateway
@@ -175,8 +175,8 @@ wire_api = "responses"
 Pass the gateway key when running:
 
 ```bash
-docker compose run --rm -e RELAY_API_KEY='YOUR_KEY' codex
-docker compose run --rm -T -e RELAY_API_KEY='YOUR_KEY' codex exec "Inspect this project and summarize its stack and startup steps"
+docker compose -f docker-compose-cli.yaml run --rm -e RELAY_API_KEY='YOUR_KEY' codex
+docker compose -f docker-compose-cli.yaml run --rm -T -e RELAY_API_KEY='YOUR_KEY' codex exec "Inspect this project and summarize its stack and startup steps"
 ```
 
 The gateway must support the Responses API used by Codex. Use the gateway's own credentials and evaluate its access to prompts and code.
@@ -189,12 +189,12 @@ The base image and Playwright are pinned at the top of Dockerfile. Codex default
 
 ```bash
 # Version, interactive CLI, and one-shot task
-docker compose run --rm codex --version
-docker compose run --rm codex
-docker compose run --rm -T codex exec "Read the project and write an architecture summary"
+docker compose -f docker-compose-cli.yaml run --rm codex --version
+docker compose -f docker-compose-cli.yaml run --rm codex
+docker compose -f docker-compose-cli.yaml run --rm -T codex exec "Read the project and write an architecture summary"
 # Container shell and temporary project mount
-docker compose run --rm --entrypoint bash codex
-docker compose run --rm -v /path/to/project:/workspace codex
+docker compose -f docker-compose-cli.yaml run --rm --entrypoint bash codex
+docker compose -f docker-compose-cli.yaml run --rm -v /path/to/project:/workspace codex
 # Refresh Codex from npm latest; other versions are pinned in Dockerfile and requirements.txt
 docker build --pull --no-cache -t docker.cnb.cool/vvllm/codex .
 # Override the Codex version for one build
@@ -208,8 +208,8 @@ Keep `auth.json` private and out of Git. Use trusted gateways and keep ChatGPT l
 If the host blocks nested sandbox creation and reports namespace or bwrap errors, test the following after reviewing the mounted directories:
 
 ```bash
-docker compose run --rm codex --sandbox danger-full-access
-docker compose run --rm -T --interactive=false codex --sandbox danger-full-access --ask-for-approval never exec --skip-git-repo-check "ping"
+docker compose -f docker-compose-cli.yaml run --rm codex --sandbox danger-full-access
+docker compose -f docker-compose-cli.yaml run --rm -T --interactive=false codex --sandbox danger-full-access --ask-for-approval never exec --skip-git-repo-check "ping"
 ```
 
 The second command disables terminal interaction and approval prompts and allows a non-Git working directory. Full access removes Codex's additional in-container sandbox, giving it access to all mounted content. Review mounts accordingly.

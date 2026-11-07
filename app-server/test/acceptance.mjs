@@ -53,7 +53,7 @@ try {
     'rm -f /auth/mqtt-passwords; mosquitto_passwd -c -b /auth/mqtt-passwords "$1" "$2"; chmod 644 /auth/mqtt-passwords', 'sh', instance, password]);
   // Copy only authentication and configuration, never the user's session databases.
   for (const file of ['config.toml', 'auth.json']) await copyFile(join(sourceHome, file), join(home, file));
-  const compose = JSON.parse(await run('docker', ['compose', '-f', 'docker-compose-app-server.yaml', 'config', '--format', 'json']));
+  const compose = JSON.parse(await run('docker', ['compose', '-f', 'docker-compose.yaml', 'config', '--format', 'json']));
   compose.name = project;
   delete compose.volumes;
   compose.networks = { default: {} };

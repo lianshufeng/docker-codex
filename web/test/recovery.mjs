@@ -35,11 +35,11 @@ try {
   const base=`/projects/${project.id}/sessions/${session.id}`;
   assert.equal((await request(base+'/history')).turns.length,0);
   const before=await request('/status');
-  await docker(['compose','-f','docker-compose-app-server.yaml','restart','mqtt']);
+  await docker(['compose','-f','docker-compose.yaml','restart','mqtt']);
   await until(async()=>(await request('/status')).connected);
   assert.equal((await request(base+'/history')).turns.length,0);
   checks.push('Broker restart reconnects and empty history stays readable');
-  await docker(['compose','-f','docker-compose-app-server.yaml','restart','codex-app-server']);
+  await docker(['compose','-f','docker-compose.yaml','restart','codex-app-server']);
   await until(async()=>{const s=await request('/status');return s.connected && s.runId!==before.runId});
   assert.equal((await request(base+'/history')).turns.length,0);
   const current=(await request('/projects')).projects.find(p=>p.id===project.id).sessions[0];

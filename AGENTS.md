@@ -4,7 +4,7 @@
 - 根目录 README 默认使用中文。每次更新项目介绍、截图、启动命令、功能或限制，都要在同一次变更中同步更新 `README.md` 和 `README.en.md`，并检查双向语言入口。
 - 只做必要的局部修改，不整文件重写已有文件。不提交真实凭据、运行数据、日志、构建产物或 node_modules。
 - 根目录 Dockerfile 的版本集中维护。Codex 默认使用 `ARG CODEX_VERSION=latest`，跟随 npm 最新正式版。基础镜像和 Playwright 使用固定值并放在顶部的 `ARG`，基础镜像的 `ARG` 放在 `FROM` 前。Python 依赖固定版本放在根目录 `requirements.txt`，Dockerfile 通过 `pip install -r` 安装。更新固定版本时核对上游正式发布和 Node.js、Python、操作系统支持范围，并运行镜像工具验收。
-- Codex 与 MQTT 使用根目录 docker-compose-app-server.yaml。所有用户共用一个 app-server。
+- Codex 与 MQTT 使用根目录 docker-compose.yaml；独立 CLI 使用 docker-compose-cli.yaml。所有用户共用一个 app-server。
 - 镜像已预装 Playwright 和 Chromium headless shell；维护 codex-home/AGENTS.md 的运行说明，浏览器验收必须直接使用已有浏览器，不在任务中安装浏览器。
 - 镜像常用工具变更需运行 acceptance/tools-smoke.sh，以 node 用户在断网容器内验证办公文件、网页解析、浏览器截图、PDF 和压缩包；Python 与 pip 的登录 Shell 环境必须一致。
 - Web 是独立示例，源码位于 web/client 和 web/server，启动配置只能放在 web/docker-compose.yml。
@@ -21,5 +21,5 @@
 - 图片输入保存到所属项目 attachments 目录，以服务端生成的共享路径传递 localImage；校验格式、大小和数量，不接受浏览器指定的任意本地路径。
 - 回复图片支持 Markdown 图片、图片链接及 imageView；本地图片统一经过登录鉴权与项目路径校验，不直接暴露宿主机文件路径供浏览器读取。
 - cwd 是工作目录，不是用户文件安全隔离。示例保留共享 app-server 的这一边界，不宣称强多租户隔离。
-- 验收必须启动现有 Codex Compose 和 web/docker-compose.yml，验证用户、项目会话、真实远程任务、历史、文件下载删除及跨用户接口拒绝。
+- 验收必须启动根目录 docker-compose.yaml 和 web/docker-compose.yml，验证用户、项目会话、真实远程任务、历史、文件下载删除及跨用户接口拒绝。
 - 自建验收数据独立记录，不能删除已有用户数据。完成后回读文件、检查编码和 Git 忽略规则，报告真实通过项与限制。
