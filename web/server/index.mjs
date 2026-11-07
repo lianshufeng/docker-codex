@@ -1,19 +1,20 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
-import { mkdir, readdir, lstat, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, lstat, rm, readFile, open } from 'node:fs/promises';
 import { constants, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Auth } from './auth.mjs';
 import { CodexBus } from './mqtt.mjs';
-import { decodeImages } from './images.mjs';
+import { decodeImages, decodeFiles } from './images.mjs';
 import { Projects, Locks, HttpError, requireValue, displayName } from './storage.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(await readFile(path.join(appRoot, 'config.json'), 'utf8'));
 const maxConcurrentTasks = config.maxConcurrentTasks ?? 4;
+const attachmentDate = new Intl.DateTimeFormat('en-CA', { timeZone: config.attachmentTimeZone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' });
 if (!Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1) throw new Error('maxConcurrentTasks 必须是正整数');
 const projects = new Projects(config.workspaceRoot);
 const auth = new Auth(path.resolve(appRoot, config.dataDirectory, 'users.json'));
@@ -75,7 +76,9 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use((req, res, next) => express.json({ limit: /^\/api\/projects\/[^/]+\/sessions\/[^/]+\/messages$/.test(req.path) ? '12mb' : '256kb' })(req, res, next));
+const messageRoute = /^\/api\/projects\/[^/]+\/sessions\/[^/]+\/messages$/;
+const parseJson = express.json({ limit: '256kb' });
+app.use((req, res, next) => req.method === 'POST' && messageRoute.test(req.path) ? next() : parseJson(req, res, next));
 const router = express.Router();
 const limits = new Map();
 router.use('/auth', (req, res, next) => {
@@ -176,7 +179,7 @@ async function syncState(session) {
   // thread/read can briefly report idle after turn/start; only a known completed turn clears our reservation.
   if (!running && active.has(session.threadId)) {
     const known = active.get(session.threadId);
-    const turns = await bus.rpc('thread/turns/list', { threadId: session.threadId, limit: 5 });
+    const turns = await listTurns(session.threadId, { limit: 5 });
     if (turns.data.some(t => t.id === known && ['completed','failed','interrupted'].includes(t.status))) active.delete(session.threadId);
   }
   return result.thread;
@@ -235,39 +238,81 @@ router.delete('/projects/:pid/sessions/:sid', async (req, res) => {
   });
 });
 function publicTurn(turn) { return { ...turn, items: (turn.items || []).filter(i => i.type !== 'reasoning') }; }
+async function listTurns(threadId, params = {}) {
+  try { return await bus.rpc('thread/turns/list', { threadId, ...params }); }
+  catch (error) {
+    if (/not materialized yet/.test(error.message)) return { data: [], nextCursor: null };
+    if (!/list_turns is not supported|unsupported.*method/i.test(error.message)) throw error;
+    const legacy = await bus.rpc('thread/read', { threadId, includeTurns: true });
+    const offset = params.cursor ? Number(String(params.cursor).replace(/^legacy:/, '')) : 0;
+    requireValue(Number.isSafeInteger(offset) && offset >= 0, '历史游标无效');
+    const turns = [...(legacy.thread.turns || [])].reverse();
+    const end = offset + (params.limit || 20);
+    return { data: turns.slice(offset, end), nextCursor: end < turns.length ? `legacy:${end}` : null };
+  }
+}
 router.get('/projects/:pid/sessions/:sid/history', async (req, res) => {
   const { session } = await getSession(req);
   const thread = await syncState(session);
-  let result;
-  try { result = await bus.rpc('thread/turns/list', { threadId: session.threadId, limit: 20, itemsView: 'full', sortDirection: 'desc', ...(req.query.cursor ? { cursor: String(req.query.cursor) } : {}) }); }
-  catch (e) {
-    if (/not materialized yet/.test(e.message)) result = { data: [], nextCursor: null };
-    else if (/list_turns is not supported|unsupported.*method/i.test(e.message)) {
-      const legacy = await bus.rpc('thread/read', { threadId: session.threadId, includeTurns: true });
-      result = { data: [...(legacy.thread.turns || [])].reverse().slice(0, 20), nextCursor: null };
-    } else throw e;
-  }
+  const result = await listTurns(session.threadId, { limit: 20, itemsView: 'full', sortDirection: 'desc', ...(req.query.cursor ? { cursor: String(req.query.cursor) } : {}) });
   res.json({ turns: result.data.map(publicTurn), nextCursor: result.nextCursor, active: active.get(session.threadId) || null,
     approvals: [...approvals.values()].filter(a => a.threadId === session.threadId).map(a => a.message), status: thread.status });
 });
-router.post('/projects/:pid/sessions/:sid/messages', async (req, res) => {
+router.post('/projects/:pid/sessions/:sid/messages', express.json({ limit: '56mb' }), async (req, res) => {
+  requireValue(req.body && typeof req.body === 'object', '消息格式无效');
   const text = req.body.text ?? '';
   const images = decodeImages(req.body.images);
-  requireValue(typeof text === 'string' && text.length <= 30000 && (text.trim().length > 0 || images.length > 0), '请输入消息或附带图片，文字最多 30000 个字符');
+  const files = decodeFiles(req.body.files);
+  requireValue(images.length + files.length <= 4, '每条消息最多附带 4 个文件');
+  requireValue(typeof text === 'string' && text.length <= 30000 && (text.trim().length > 0 || images.length > 0 || files.length > 0), '请输入消息或附带文件，文字最多 30000 个字符');
   await projects.locks.run(key(req), async () => {
     const { project, session } = await getSession(req);
     if (project.deleting) throw new HttpError(409, '项目正在删除');
     await syncState(session);
     async function input() {
       const content = text.trim() ? [{ type: 'text', text }] : [];
-      if (images.length) {
+      if (images.length || files.length) {
         const root = await projects.checkedDirectory(req.user.id, req.params.pid);
-        await mkdir(path.join(root, 'attachments'), { recursive: true });
-        const { target } = await projects.file(req.user.id, req.params.pid, 'attachments');
-        for (const image of images) {
-          const name = `${randomUUID()}.${image.extension}`;
-          await writeFile(path.join(target, name), image.bytes, { flag: 'wx', mode: 0o600 });
-          content.push({ type: 'localImage', path: path.posix.join(cwd(req), 'attachments', name) });
+        const dateParts = attachmentDate.formatToParts(new Date());
+        const day = ['year', 'month', 'day'].map(type => dateParts.find(part => part.type === type).value).join('');
+        for (const relative of ['attachments', `attachments/${day}`]) {
+          try { await mkdir(path.join(root, relative)); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+          const directory = await projects.file(req.user.id, req.params.pid, relative);
+          requireValue(directory.stat.isDirectory(), '附件路径必须是文件夹');
+        }
+        const { target } = await projects.file(req.user.id, req.params.pid, `attachments/${day}`);
+        const saved = [];
+        async function save(bytes, originalName) {
+          const parsed = path.parse(originalName);
+          const base = parsed.name || '文件';
+          const ext = parsed.ext;
+          for (let index = 0; index < 10000; index++) {
+            const name = `${base}${index ? index : ''}${ext}`;
+            const destination = path.join(target, name);
+            try {
+              const handle = await open(destination, 'wx', 0o600);
+              saved.push(destination);
+              try { await handle.writeFile(bytes); } finally { await handle.close(); }
+              return name;
+            }
+            catch (error) { if (error.code !== 'EEXIST') throw error; }
+          }
+          throw new HttpError(409, '附件名称冲突过多，请稍后重试');
+        }
+        try {
+          for (const image of images) {
+            const name = await save(image.bytes, `图片.${image.extension}`);
+            content.push({ type: 'localImage', path: path.posix.join(cwd(req), 'attachments', day, name) });
+          }
+          for (const file of files) {
+            const name = await save(file.bytes, file.name);
+            const relative = path.posix.join('attachments', day, name);
+            content.push({ type: 'text', text: `附件：${JSON.stringify({ name, path: relative })}` });
+            if (file.image) content.push({ type: 'localImage', path: path.posix.join(cwd(req), relative) });
+          }
+        } catch (error) {
+          await Promise.all(saved.map(file => rm(file, { force: true })));
+          throw error;
         }
       }
       return content;
@@ -299,7 +344,7 @@ router.post('/projects/:pid/sessions/:sid/stop', async (req, res) => {
   const thread = await syncState(session);
   let turnId = active.get(session.threadId);
   if (turnId === 'unknown' || turnId === 'pending') {
-    const turns = await bus.rpc('thread/turns/list', { threadId: session.threadId, limit: 5 });
+    const turns = await listTurns(session.threadId, { limit: 5 });
     turnId = turns.data.find(t => t.status === 'inProgress')?.id;
   }
   if (!turnId) return res.json({ ok: true });

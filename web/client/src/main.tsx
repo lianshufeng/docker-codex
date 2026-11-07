@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ReplyMarkdown, ReturnedImage } from './reply-images';
-import { Plus, Folder, FolderOpen, MessageSquare, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, FileText } from 'lucide-react';
+import { Plus, Folder, FolderOpen, MessageSquare, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, File, FileText } from 'lucide-react';
 import './style.css';
 import './images.css';
 
@@ -9,7 +9,8 @@ type User = { id: string; username: string };
 type Session = { id: string; threadId: string; name: string; createdAt: string };
 type Project = { id: string; name: string; sessions: Session[]; deleting?: boolean };
 type Item = { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[] };
-type Dialog = { type: string; title: string; value?: string; project?: Project; session?: Session; file?: any };
+type Attachment = { data: string; name: string; size: number; image: boolean };
+type Dialog = { type: string; title: string; value?: string; project?: Project; session?: Session; file?: any; relative?: string };
 async function api(url: string, options: RequestInit = {}) {
   const response = await fetch('/api' + url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } });
   const result = await response.json().catch(() => ({ error: '服务器响应无效' }));
@@ -31,7 +32,10 @@ function App() {
   const [approvals, setApprovals] = useState<any[]>([]), [message, setMessage] = useState(''), [filePath, setFilePath] = useState(''), [files, setFiles] = useState<any[]>([]);
   const [dialog, setDialog] = useState<Dialog | null>(null), [dialogValue, setDialogValue] = useState(''), [oldPassword, setOldPassword] = useState('');
   const [menu, setMenu] = useState(false), [socketConnected, setSocketConnected] = useState(false);
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useState<Attachment[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [readingFiles, setReadingFiles] = useState(false);
+  const reading = useRef(false);
   const imageVersion = useRef(0);
   const selection = useRef({ pid, sid }); selection.current = { pid, sid };
   const historyVersion = useRef(0), liveVersion = useRef(0), fileVersion = useRef(0), scroll = useRef<HTMLDivElement>(null);
@@ -137,36 +141,40 @@ function App() {
         await api(`/projects/${p.id}`, { method: 'DELETE' }); await refreshProjects(); if (pid === p.id) { setPid(''); setSid(''); }
       } else if (dialog.type === 'delete-session' && p && dialog.session) {
         await api(sessionUrl(p.id, dialog.session.id), { method: 'DELETE' }); await refreshProjects(); if (sid === dialog.session.id) setSid('');
-      } else if (dialog.type === 'delete-file' && p) {
-        const relative = [filePath, dialog.file.name].filter(Boolean).join('/');
-        await api(`/projects/${p.id}/files?path=${encodeURIComponent(relative)}`, { method: 'DELETE' }); await refreshFiles();
+      } else if (dialog.type === 'delete-file' && p && dialog.relative) {
+        await api(`/projects/${p.id}/files?path=${encodeURIComponent(dialog.relative)}`, { method: 'DELETE' }); await refreshFiles();
       } else if (dialog.type === 'password') {
         await post('/auth/password', { oldPassword, newPassword: dialogValue }); setUser(null); setItems([]); setNotice('密码已修改，请重新登录');
       }
       setDialog(null);
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   }
+  async function addFiles(selected: File[]) {
+    if (!selected.length || busy || reading.current || !session) return;
+    reading.current = true; setReadingFiles(true); setError('');
+    const version = imageVersion.current;
+    try {
+      if (selected.some(file => file.size > 10 * 1024 * 1024)) throw new Error('单个文件不能超过 10 MB');
+      if (selected.some(file => file.type.startsWith('image/') && (!['image/png','image/jpeg','image/webp','image/gif'].includes(file.type) || file.size > 2 * 1024 * 1024))) throw new Error('图片仅支持 PNG、JPEG、WebP 和 GIF，单张不超过 2 MB');
+      if (images.length + selected.length > 4) throw new Error('每条消息最多附带 4 个文件');
+      const added = await Promise.all(selected.map(file => new Promise<Attachment>((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve({ data: String(reader.result), name: file.name, size: file.size, image: file.type.startsWith('image/') }); reader.onerror = () => reject(new Error('文件读取失败')); reader.readAsDataURL(file);
+      })));
+      if (version !== imageVersion.current) return;
+      setImages(current => [...current, ...added]);
+    } catch (e: any) { setError(e.message); } finally { reading.current = false; setReadingFiles(false); }
+  }
   async function pasteImages(event: React.ClipboardEvent<HTMLTextAreaElement>) {
     const files = Array.from(event.clipboardData.items).filter(item => item.type.startsWith('image/')).map(item => item.getAsFile()).filter((file): file is File => Boolean(file));
     if (!files.length) return;
     event.preventDefault();
-    if (busy) return;
-    const version = imageVersion.current;
-    try {
-      if (files.some(file => !['image/png','image/jpeg','image/webp','image/gif'].includes(file.type) || file.size > 2 * 1024 * 1024)) throw new Error('仅支持 PNG、JPEG、WebP 和 GIF，单张不超过 2 MB');
-      const added = await Promise.all(files.map(file => new Promise<string>((resolve, reject) => {
-        const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error('图片读取失败')); reader.readAsDataURL(file);
-      })));
-      if (version !== imageVersion.current) return;
-      setImages(current => [...current, ...added].slice(0, 4));
-      if (images.length + added.length > 4) setError('每条消息最多附带 4 张图片');
-    } catch (e: any) { setError(e.message); }
+    await addFiles(files);
   }
   async function send(event: React.FormEvent, steer = false) {
-    event.preventDefault(); if ((!message.trim() && !images.length) || !session || busy) return; setBusy(true); setError('');
+    event.preventDefault(); if ((!message.trim() && !images.length) || !session || busy || reading.current) return; setBusy(true); setError('');
     const selected = selection.current.sid;
     imageVersion.current++;
-    try { await post(sessionUrl() + '/messages', { text: message, images, steer }); if (selection.current.sid === selected) { setMessage(''); setImages([]); setRunning(true); } }
+    try { await post(sessionUrl() + '/messages', { text: message, files: images, steer }); if (selection.current.sid === selected) { setMessage(''); setImages([]); setRunning(true); if (filePanel) await refreshFiles(); } }
     catch (e: any) { setError(e.message); } finally { setBusy(false); }
   }
   async function stop() { try { await post(sessionUrl() + '/stop'); } catch (e: any) { setError(e.message); } }
@@ -179,23 +187,54 @@ function App() {
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     <div className="chat-scroll" ref={scroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'创建项目'})}><Plus size={17}/>{project?'新建会话':'创建第一个项目'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}{items.map(item => <ChatItem key={item.id} item={item} projectId={pid}/>)}{running && <div className="working"><span className="pulse"/> AI 助手 正在工作<span className="working-hint">可以追加要求或停止任务</span></div>}{approvals.map(a => <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method.endsWith('/requestApproval') ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}</div>}</div>
     <div className="composer-wrap"><form className="composer" onSubmit={e => send(e,running)}>
-    {images.length > 0 && <div className="image-attachments">{images.map((image,index) => <div className="image-attachment" key={index}><img src={image} alt={`待发送图片 ${index+1}`}/><button type="button" aria-label={`移除图片 ${index+1}`} disabled={busy} onClick={() => setImages(current => current.filter((_,i) => i !== index))}><X size={14}/></button></div>)}</div>}
-    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected)send(e as any,running)}}}/><div className="composer-bottom"><span><span className="dot"/> AI 助手 <ChevronDown size={12}/></span><div><span className="enter-hint">{running?'追加到当前任务':'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>文件保存在当前项目中</span></div></div></main>
-    {filePanel && project && <aside className="file-panel"><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<FileText size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title="删除文件" aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:'删除文件',project,file})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
-    {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'项目下的会话、文件及磁盘目录也会删除。':dialog.type==='delete-session'?'仅删除聊天会话，项目共享文件会保留；删除文件请使用文件面板，或删除整个项目。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}<label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:80} autoComplete={dialog.type==='password'?'new-password':'off'}/></label></>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy}>{busy?'正在处理…':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
+    {images.length > 0 && <div className="image-attachments">{images.map((file,index) => <div className="image-attachment" key={index} title={`${file.name} · ${formatBytes(file.size)}`}>{file.image ? <img src={file.data} alt={`待发送图片 ${index+1}`}/> : <div className="file-attachment"><FileText size={22}/><span>{file.name}<small>{formatBytes(file.size)}</small></span></div>}<button type="button" aria-label={`移除${file.image ? '图片' : '附件'} ${index+1}`} disabled={busy} onClick={() => setImages(current => current.filter((_,i) => i !== index))}><X size={14}/></button></div>)}</div>}
+    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected)send(e as any,running)}}}/><div className="composer-bottom"><span><span className="dot"/> AI 助手 <ChevronDown size={12}/></span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（最多 4 个，单个 10 MB，图片 2 MB）" aria-label="添加文件" disabled={!session||busy||readingFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?'追加到当前任务':'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>文件保存在当前项目中</span></div></div></main>
+    {filePanel && project && <aside className="file-panel"><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<File size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title={file.directory?'删除文件夹':'删除文件'} disabled={busy||running} aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:file.directory?'删除文件夹':'删除文件',project,file,relative})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
+    {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'项目下的会话、文件及磁盘目录也会删除。':dialog.type==='delete-session'?'仅删除聊天会话，项目共享文件会保留；删除文件请使用文件面板，或删除整个项目。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}<label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:80} autoComplete={dialog.type==='password'?'new-password':'off'}/></label></>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy}>{busy?'正在处理…':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
   </div>;
 }
 function formatBytes(value:number){return value<1024?`${value} B`:value<1048576?`${(value/1024).toFixed(1)} KB`:`${(value/1048576).toFixed(1)} MB`}
 function MessageImages({content}:{content:any[]}) {
   return <div className="message-images">{content.filter(c => c.type === 'localImage' || c.type === 'image').map((image,index) => {
-    const local = typeof image.path === 'string' && /\/([0-9a-f-]{36})\/attachments\/([0-9a-f-]{36}\.(?:png|jpg|webp|gif))$/.exec(image.path);
-    const src = local ? `/api/projects/${local[1]}/download?path=${encodeURIComponent('attachments/' + local[2])}` : /^data:image\/(png|jpeg|webp|gif);base64,/.test(image.url || '') ? image.url : '';
-    return src ? <a key={index} href={src} target="_blank" rel="noopener noreferrer"><img src={src} alt={`消息图片 ${index+1}`} loading="lazy"/></a> : <span key={index}>[图片]</span>;
+    const local = typeof image.path === 'string' && /\/([0-9a-f-]{36})\/(attachments\/(?:\d{8}\/)?[^/]+)$/.exec(image.path);
+    const src = local ? `/api/projects/${local[1]}/image?path=${encodeURIComponent(local[2])}` : /^data:image\/(png|jpeg|webp|gif);base64,/.test(image.url || '') ? image.url : '';
+    return src ? <MessageImage key={src} src={src} index={index}/> : <span key={index}>[图片]</span>;
   })}</div>;
+}
+function MessageImage({src, index}:{src:string; index:number}) {
+  const [missing, setMissing] = useState(false);
+  return missing ? <span>图片不存在或无法读取</span> : <a href={src} target="_blank" rel="noopener noreferrer"><img src={src} alt={`消息图片 ${index+1}`} loading="lazy" onError={() => setMissing(true)}/></a>;
+}
+function MessageFile({name, relative, projectId}:{name:string; relative:string; projectId:string}) {
+  const [error, setError] = useState('');
+  const url = `/api/projects/${projectId}/download?path=${encodeURIComponent(relative)}`;
+  async function download(event: React.MouseEvent) {
+    event.preventDefault(); setError('');
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(response.status === 404 ? '文件不存在或已删除' : '文件下载失败');
+      const blob = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a'); link.href = blob; link.download = name; link.click();
+      setTimeout(() => URL.revokeObjectURL(blob), 1000);
+    } catch (e: any) { setError(e.message); }
+  }
+  return <span className="message-file"><File size={16}/><a href={url} onClick={download}>{name}</a>{error && <small role="alert">{error}</small>}</span>;
+}
+function UserMessage({content, projectId}:{content:any[]; projectId:string}) {
+  const text = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+  return <div className="user-message"><div><MessageImages content={content}/>{text.split('\n').map((line:string, index:number) => {
+    if (line.startsWith('附件：')) {
+      try {
+        const file = JSON.parse(line.slice(3));
+        if (typeof file.name === 'string' && typeof file.path === 'string' && /^attachments\/\d{8}\/[^/\\]+$/.test(file.path)) return <MessageFile key={index} name={file.name} relative={file.path} projectId={projectId}/>;
+      } catch { /* 普通消息中的同名文本按原样显示。 */ }
+    }
+    return <React.Fragment key={index}>{line}{'\n'}</React.Fragment>;
+  })}</div></div>;
 }
 function ChatItem({item, projectId}:{item:Item; projectId:string}) {
   if(item.type==='reasoning')return null;
-  if(item.type==='userMessage'){const text=(item.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('\n');return <div className="user-message"><div><MessageImages content={item.content || []}/>{text}</div></div>}
+  if(item.type==='userMessage')return <UserMessage content={item.content || []} projectId={projectId}/>;
   if(item.type==='agentMessage')return <article className="agent-message"><div className="agent-label"><Logo small/><span>AI 助手</span></div><div className="markdown"><ReplyMarkdown text={item.text || ''} projectId={projectId}/></div></article>;
   if(item.type==='imageView')return <ReturnedImage value={(item as Item & {path:string}).path} projectId={projectId}/>;
   if(item.type==='commandExecution')return <details className="tool-item"><summary><Terminal size={14}/><span>{item.status==='inProgress'?'正在执行命令':'执行命令'}</span><small>{item.status==='completed'?'完成':item.status==='inProgress'?'运行中':item.status}</small><ChevronDown size={13}/></summary><pre>{item.command}</pre>{item.aggregatedOutput&&<pre className="tool-output">{item.aggregatedOutput.slice(-20000)}</pre>}</details>;

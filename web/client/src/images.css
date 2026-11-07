@@ -2,6 +2,10 @@
 .image-attachment { position: relative; }
 .image-attachment img { display: block; width: 88px; height: 88px; object-fit: cover; border-radius: 9px; }
 .image-attachment button { position: absolute; right: -5px; top: -5px; border: 1px solid #555; border-radius: 50%; background: #222; color: white; width: 23px; height: 23px; display: grid; place-items: center; }
+.file-attachment { display: flex; align-items: center; gap: 8px; max-width: 240px; padding: 9px 14px; border: 1px solid #555; border-radius: 9px; overflow-wrap: anywhere; }
+.file-attachment small { display: block; color: #aaa; }
+.composer input[type='file'][hidden] { display: none; }
+.message-file { display: flex; align-items: center; gap: 6px; margin-top: 4px; overflow-wrap: anywhere; }
 .message-images { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .message-images img { max-width: min(260px, 100%); max-height: 220px; object-fit: contain; border-radius: 9px; }
 .reply-image { display: inline-block; max-width: 100%; margin: 8px 0; }

@@ -17,3 +17,25 @@ export function decodeImages(images = []) {
     return { bytes, extension: type === 'jpeg' ? 'jpg' : type };
   });
 }
+
+export function decodeFiles(files = []) {
+  requireValue(Array.isArray(files) && files.length <= 4, '每条消息最多附带 4 个文件');
+  return files.map(file => {
+    requireValue(file && typeof file === 'object' && typeof file.name === 'string' && typeof file.data === 'string', '文件格式无效');
+    let name = file.name.normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').replace(/^[. ]+|[. ]+$/g, '');
+    requireValue(name && !name.startsWith('.web-') && Buffer.byteLength(name) <= 180, '文件名无效或过长');
+    const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(file.data);
+    requireValue(match, '文件内容无效');
+    const bytes = Buffer.from(match[2], 'base64');
+    if (bytes.length > 10 * 1024 * 1024) throw new HttpError(413, '单个文件不能超过 10 MB');
+    requireValue(bytes.toString('base64') === match[2], '文件内容无效');
+    const extension = /\.(png|jpe?g|webp|gif)$/i.exec(name)?.[1].toLowerCase();
+    const image = match[1].startsWith('image/') || Boolean(extension);
+    if (image) {
+      const mime = match[1].startsWith('image/') ? match[1] : `image/${extension === 'jpg' ? 'jpeg' : extension}`;
+      const decoded = decodeImages([`data:${mime};base64,${match[2]}`])[0];
+      if (extension !== decoded.extension && !(extension === 'jpeg' && decoded.extension === 'jpg')) name += `.${decoded.extension}`;
+    }
+    return { name, image, bytes };
+  });
+}
