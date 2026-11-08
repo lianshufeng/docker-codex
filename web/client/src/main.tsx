@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ReplyMarkdown, ReturnedImage } from './reply-images';
 import { Plus, Folder, FolderOpen, MessageSquare, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, File, FileText } from 'lucide-react';
@@ -6,7 +6,7 @@ import './style.css';
 import './images.css';
 
 type User = { id: string; username: string };
-type Session = { id: string; threadId: string; name: string; createdAt: string };
+type Session = { id: string; threadId: string; name: string; createdAt: string; updatedAt?: string };
 type Project = { id: string; name: string; sessions: Session[]; deleting?: boolean };
 type Item = { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[] };
 type Attachment = { data: string; name: string; size: number; image: boolean };
@@ -21,12 +21,18 @@ const post = (url: string, body: any = {}) => api(url, { method: 'POST', body: J
 function Logo({ small = false }: { small?: boolean }) {
   return <span className={'logo ' + (small ? 'small' : '')} aria-hidden="true">⌘</span>;
 }
+const compactLayout = '(max-width: 800px)';
 function App() {
   const [user, setUser] = useState<User | null>(null), [boot, setBoot] = useState(true);
   const [mode, setMode] = useState('login'), [username, setUsername] = useState(''), [password, setPassword] = useState('');
   const [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]), [pid, setPid] = useState(''), [sid, setSid] = useState('');
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({}), [sidebar, setSidebar] = useState(true), [filePanel, setFilePanel] = useState(false);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({}), [desktopSidebar, setDesktopSidebar] = useState(true), [filePanel, setFilePanel] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia(compactLayout).matches);
+  const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [sessionQuery, setSessionQuery] = useState(''), [recentLimit, setRecentLimit] = useState(8);
+  const sidebar = isMobile ? mobileSidebar : desktopSidebar;
+  const drawerOpen = isMobile && (sidebar || (filePanel && Boolean(pid)));
   const [status, setStatus] = useState<any>({ connected: false, state: 'connecting' });
   const [items, setItems] = useState<Item[]>([]), [running, setRunning] = useState(false), [loadingHistory, setLoadingHistory] = useState(false), [cursor, setCursor] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<any[]>([]), [message, setMessage] = useState(''), [filePath, setFilePath] = useState(''), [files, setFiles] = useState<any[]>([]);
@@ -34,6 +40,21 @@ function App() {
   const [menu, setMenu] = useState(false), [socketConnected, setSocketConnected] = useState(false);
   const [images, setImages] = useState<Attachment[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
+  const drawer = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!drawerOpen || !user || dialog) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    drawer.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    function trapFocus(event: KeyboardEvent) {
+      if (event.key !== 'Tab' || !drawer.current) return;
+      const controls = Array.from(drawer.current.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled)'));
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+    document.addEventListener('keydown', trapFocus);
+    return () => { document.removeEventListener('keydown', trapFocus); previousFocus?.focus(); };
+  }, [drawerOpen, sidebar, user?.id, dialog]);
   const [readingFiles, setReadingFiles] = useState(false);
   const reading = useRef(false);
   const imageVersion = useRef(0);
@@ -41,7 +62,32 @@ function App() {
   const historyVersion = useRef(0), liveVersion = useRef(0), fileVersion = useRef(0), scroll = useRef<HTMLDivElement>(null);
   const project = projects.find(p => p.id === pid), session = project?.sessions.find(s => s.id === sid);
   const sessionUrl = (p = pid, s = sid) => `/projects/${p}/sessions/${s}`;
+  useEffect(() => {
+    const media = window.matchMedia(compactLayout);
+    const update = () => { setIsMobile(media.matches); setMobileSidebar(false); setFilePanel(false); };
+    if (media.addEventListener) {
+      media.addEventListener('change', update);
+      return () => media.removeEventListener('change', update);
+    }
+    media.addListener(update);
+    return () => media.removeListener(update);
+  }, []);
+  function setSidebar(open: boolean) {
+    if (isMobile) { setMobileSidebar(open); if (open) setFilePanel(false); }
+    else setDesktopSidebar(open);
+    if (!open) setMenu(false);
+  }
+  function closeDrawer() { setSidebar(false); setFilePanel(false); }
+  function toggleFiles() {
+    if (isMobile) setSidebar(false);
+    setFilePanel(!filePanel);
+  }
   async function refreshProjects() { const result = await api('/projects'); setProjects(result.projects); return result.projects as Project[]; }
+  function selectSession(projectId: string, sessionId: string) {
+    setPid(projectId); setSid(sessionId); setSessionQuery(''); setRecentLimit(8);
+    if (isMobile) setSidebar(false);
+  }
+  function sessionActivity(session: Session) { return Date.parse(session.updatedAt || session.createdAt) || 0; }
   async function loadHistory(older = false) {
     const selected = selection.current; if (!selected.sid) return;
     const version = ++historyVersion.current, liveAt = liveVersion.current;
@@ -72,7 +118,7 @@ function App() {
   useEffect(() => {
     if (!user) return;
     const savedSelection = JSON.parse(localStorage.getItem('codex-selection-' + user.id) || '{}');
-    setProjects([]); setItems([]); setApprovals([]); setPid(''); setSid('');
+    setProjects([]); setItems([]); setApprovals([]); setPid(''); setSid(''); setSessionQuery(''); setRecentLimit(8);
     refreshProjects().then(list => {
       const saved = savedSelection;
       const p = list.find(v => v.id === saved.pid) || list[0];
@@ -85,6 +131,14 @@ function App() {
       socket.onmessage = event => {
         let data: any; try { data = JSON.parse(event.data); } catch { return; }
         if (data.type === 'auth-expired') { setUser(null); setItems([]); return; }
+        if (data.type === 'session-activity') {
+          setProjects(current => current.map(project => project.id === data.projectId ? {
+            ...project,
+            sessions: project.sessions.map(session => session.id === data.sessionId && (!session.updatedAt || session.updatedAt < data.updatedAt)
+              ? { ...session, updatedAt: data.updatedAt } : session),
+          } : project));
+          return;
+        }
         if (data.type === 'status') { setStatus(data); if (data.connected && selection.current.sid) loadHistory(); return; }
         if (data.type !== 'rpc' || data.sessionId !== selection.current.sid) return;
         liveVersion.current++;
@@ -130,9 +184,9 @@ function App() {
     try {
       const p = dialog.project;
       if (dialog.type === 'project') {
-        const result = await post('/projects', { name: dialogValue }); await refreshProjects(); setPid(result.project.id); setSid('');
+        const result = await post('/projects', { name: dialogValue }); await refreshProjects(); setPid(result.project.id); setSid(''); if (isMobile) setSidebar(false);
       } else if (dialog.type === 'session' && p) {
-        const result = await post(`/projects/${p.id}/sessions`, { name: dialogValue || '新会话' }); await refreshProjects(); setPid(p.id); setSid(result.session.id);
+        const result = await post(`/projects/${p.id}/sessions`, { name: dialogValue || '新会话' }); await refreshProjects(); setPid(p.id); setSid(result.session.id); if (isMobile) setSidebar(false);
       } else if (dialog.type === 'rename-project' && p) {
         await api(`/projects/${p.id}`, { method: 'PATCH', body: JSON.stringify({ name: dialogValue }) }); await refreshProjects();
       } else if (dialog.type === 'rename-session' && p && dialog.session) {
@@ -179,17 +233,28 @@ function App() {
   }
   async function stop() { try { await post(sessionUrl() + '/stop'); } catch (e: any) { setError(e.message); } }
   const connected = status.connected && socketConnected;
+  const query = sessionQuery.trim().toLocaleLowerCase();
+  const matchingProjects = query ? projects.filter(project => project.name.toLocaleLowerCase().includes(query)) : projects;
+  const recentSessions = useMemo(() => projects.flatMap(project => project.sessions.map(session => ({ project, session })))
+    .filter(({ project, session }) => !query || (project.name + ' ' + session.name).toLocaleLowerCase().includes(query))
+    .sort((a, b) => sessionActivity(b.session) - sessionActivity(a.session) || a.session.id.localeCompare(b.session.id)), [projects, query]);
   if (boot) return <div className="boot"><Logo/><span>正在连接工作空间…</span></div>;
   if (!user) return <main className="auth-page"><div className="auth-brand"><Logo/><strong>AI 助手</strong><span>Workspace</span></div><div className="auth-intro"><div className="eyebrow">YOUR IDEAS, IN MOTION</div><h1>从一个想法，<br/>到一个完成的项目。</h1><p>与你的 AI 助手 协作，让调研、文档和日常工作<br/>在一个专属空间里完成。</p><div className="auth-features"><span><Globe size={18}/> 浏览器调研</span><span><FileText size={18}/> 文档与报告</span><span><Terminal size={18}/> 代码与自动化</span></div><div className="auth-example"><span className="tiny-label">一个工作空间，无限可能</span><p>“整理最新资料，生成一份调研报告”</p><div><span className="dot"/> AI 助手 已准备好</div></div></div><section className="auth-card"><h2>{mode === 'login' ? '欢迎回来' : '创建你的账号'}</h2><p>{mode === 'login' ? '登录后继续你的项目与对话' : '开始你的第一个工作空间'}</p><form onSubmit={authenticate}><label>账号<input name="username" autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} required minLength={3} maxLength={40} placeholder="输入账号"/></label><label>密码<input name="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={e => setPassword(e.target.value)} required minLength={8} maxLength={128} placeholder="至少 8 个字符"/></label>{error && <div role="alert" className="inline-error">{error}</div>}{notice && <div className="notice">{notice}</div>}<button className="primary auth-submit" disabled={busy}>{busy ? '正在处理…' : mode === 'login' ? '登录' : '注册并登录'}<ArrowUp size={17}/></button></form><div className="auth-switch">{mode === 'login' ? '还没有账号？' : '已经有账号？'}<button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }}>{mode === 'login' ? '创建账号' : '返回登录'}</button></div><p className="auth-footnote">你的项目、对话与文件，始终有序。</p></section><div className="auth-footer">AI ASSISTANT WORKSPACE <span>一个轻量、专注的协作空间</span></div></main>;
-  return <div className={'app ' + (!sidebar ? 'sidebar-hidden' : '')}>
-    {sidebar && <aside className="sidebar"><div className="sidebar-top"><div className="brand"><Logo small/><strong>AI 助手</strong></div><button className="icon-button" title="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose size={18}/></button></div><button className="new-project" onClick={() => openDialog({ type: 'project', title: '创建项目' })}><Plus size={18}/> 新建项目</button><div className="section-label">项目 <span>{projects.length}</span></div><nav className="project-tree">{projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{projects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" onClick={() => { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:!v[p.id]})); }}>{collapsed[p.id] ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button title="重命名项目" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button title="删除项目" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!collapsed[p.id] && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => { setPid(p.id); setSid(s.id); }}><MessageSquare size={14}/><span>{s.name}</span></button><div className="row-actions"><button title="重命名会话" onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="删除会话" onClick={() => openDialog({type:'delete-session',title:'删除会话',project:p,session:s})}><Trash2 size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}</nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>个人工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
-    <main className="main"><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={() => setFilePanel(!filePanel)} disabled={!project}><Files size={16}/> 文件</button></header>
+  return <div className={'app ' + (!sidebar ? 'sidebar-hidden' : '')} onKeyDown={event => { if (event.key === 'Escape' && drawerOpen && !dialog) closeDrawer(); }}>
+    {drawerOpen && <div className="mobile-backdrop" aria-hidden="true" onClick={closeDrawer}/>}
+    {sidebar && <aside className="sidebar" aria-label="项目与会话" ref={isMobile ? drawer : undefined}><div className="sidebar-top"><div className="brand"><Logo small/><strong>AI 助手</strong></div><button className="icon-button" title="收起侧栏" aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose size={18}/></button></div><button className="new-project" onClick={() => openDialog({ type: 'project', title: '创建项目' })}><Plus size={18}/> 新建项目</button><label className="sidebar-search"><span>搜索项目或会话</span><input type="search" aria-label="搜索项目或会话" placeholder="搜索项目或会话…" value={sessionQuery} onChange={event => { setSessionQuery(event.target.value); setRecentLimit(8); }}/></label><nav className="project-tree" aria-label="会话导航">
+      <div className="section-label">{query ? '搜索结果' : '最近会话'} <span>{recentSessions.length}</span></div>
+      <div className="recent-sessions">{recentSessions.slice(0, recentLimit).map(({ project: p, session: s }) => <button key={s.id} className={'recent-session '+(sid===s.id?'active':'')} onClick={() => selectSession(p.id,s.id)} title={s.name+' · '+p.name}><MessageSquare size={15}/><span><strong>{s.name}</strong><small>{p.name}</small></span></button>)}
+      {recentSessions.length===0 && <p className="sidebar-empty">{query ? (matchingProjects.length ? '匹配的项目下暂无会话' : '没有找到匹配的会话') : '新建会话后会显示在这里'}</p>}
+      {recentSessions.length>recentLimit && <button className="load-more-sessions" onClick={() => setRecentLimit(value => value+20)}>查看更多会话 <ChevronDown size={13}/></button>}</div>
+      {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button title="重命名项目" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button title="删除项目" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}><MessageSquare size={14}/><span>{s.name}</span></button><div className="row-actions"><button title="重命名会话" onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="删除会话" onClick={() => openDialog({type:'delete-session',title:'删除会话',project:p,session:s})}><Trash2 size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}</nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>个人工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
+    <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     <div className="chat-scroll" ref={scroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'创建项目'})}><Plus size={17}/>{project?'新建会话':'创建第一个项目'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}{items.map(item => <ChatItem key={item.id} item={item} projectId={pid}/>)}{running && <div className="working"><span className="pulse"/> AI 助手 正在工作<span className="working-hint">可以追加要求或停止任务</span></div>}{approvals.map(a => <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method.endsWith('/requestApproval') ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}</div>}</div>
     <div className="composer-wrap"><form className="composer" onSubmit={e => send(e,running)}>
     {images.length > 0 && <div className="image-attachments">{images.map((file,index) => <div className="image-attachment" key={index} title={`${file.name} · ${formatBytes(file.size)}`}>{file.image ? <img src={file.data} alt={`待发送图片 ${index+1}`}/> : <div className="file-attachment"><FileText size={22}/><span>{file.name}<small>{formatBytes(file.size)}</small></span></div>}<button type="button" aria-label={`移除${file.image ? '图片' : '附件'} ${index+1}`} disabled={busy} onClick={() => setImages(current => current.filter((_,i) => i !== index))}><X size={14}/></button></div>)}</div>}
-    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected)send(e as any,running)}}}/><div className="composer-bottom"><span><span className="dot"/> AI 助手 <ChevronDown size={12}/></span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（最多 4 个，单个 10 MB，图片 2 MB）" aria-label="添加文件" disabled={!session||busy||readingFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?'追加到当前任务':'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>文件保存在当前项目中</span></div></div></main>
-    {filePanel && project && <aside className="file-panel"><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<File size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title={file.directory?'删除文件夹':'删除文件'} disabled={busy||running} aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:file.directory?'删除文件夹':'删除文件',project,file,relative})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
+    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected)send(e as any,running)}}}/><div className="composer-bottom"><span><span className="dot"/> AI 助手 <ChevronDown size={12}/></span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（最多 4 个，单个 10 MB，图片 2 MB）" aria-label="添加文件" disabled={!session||busy||readingFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?'追加到当前任务':'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>文件保存在当前项目中</span></div></div></main>
+    {filePanel && project && <aside className="file-panel" aria-label="项目文件" ref={isMobile ? drawer : undefined}><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<File size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title={file.directory?'删除文件夹':'删除文件'} disabled={busy||running} aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:file.directory?'删除文件夹':'删除文件',project,file,relative})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
     {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'项目下的会话、文件及磁盘目录也会删除。':dialog.type==='delete-session'?'仅删除聊天会话，项目共享文件会保留；删除文件请使用文件面板，或删除整个项目。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}<label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:80} autoComplete={dialog.type==='password'?'new-password':'off'}/></label></>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy}>{busy?'正在处理…':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
   </div>;
 }

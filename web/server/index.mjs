@@ -58,6 +58,16 @@ bus.on('notification', (message, runId) => {
   if (!owner) return;
   if (message.method === 'turn/started') active.set(tid, params.turn.id);
   if (message.method === 'turn/completed') active.delete(tid);
+  if (message.method === 'turn/completed') {
+    const updatedAt = new Date().toISOString();
+    projects.locks.run(`${owner.uid}/${owner.pid}`, async () => {
+      const project = await projects.get(owner.uid, owner.pid);
+      const session = project.sessions.find(s => s.id === owner.sid && s.threadId === tid);
+      if (project.deleting || !session || (session.updatedAt && session.updatedAt >= updatedAt)) return;
+      await projects.update(owner.uid, owner.pid, p => { p.sessions.find(s => s.id === owner.sid).updatedAt = updatedAt; });
+      broadcast(owner.uid, { type: 'session-activity', projectId: owner.pid, sessionId: owner.sid, updatedAt });
+    }).catch(error => { if (error.code !== 'ENOENT') console.error('session_activity', error.message); });
+  }
   if (message.id !== undefined) approvals.set(String(message.id), { threadId: tid, message });
   if (message.method === 'serverRequest/resolved') approvals.delete(String(params.requestId));
   if (message.method === 'turn/completed') for (const [id, item] of approvals) if (item.threadId === tid) approvals.delete(id);
@@ -258,6 +268,15 @@ router.get('/projects/:pid/sessions/:sid/history', async (req, res) => {
   res.json({ turns: result.data.map(publicTurn), nextCursor: result.nextCursor, active: active.get(session.threadId) || null,
     approvals: [...approvals.values()].filter(a => a.threadId === session.threadId).map(a => a.message), status: thread.status });
 });
+async function recordMessageActivity(req, session) {
+  const updatedAt = new Date().toISOString();
+  await projects.update(req.user.id, req.params.pid, project => {
+    const current = project.sessions.find(s => s.id === session.id);
+    current.hasTurns = true;
+    current.updatedAt = updatedAt;
+  });
+  broadcast(req.user.id, { type: 'session-activity', projectId: req.params.pid, sessionId: session.id, updatedAt });
+}
 router.post('/projects/:pid/sessions/:sid/messages', express.json({ limit: '56mb' }), async (req, res) => {
   requireValue(req.body && typeof req.body === 'object', '消息格式无效');
   const text = req.body.text ?? '';
@@ -321,6 +340,7 @@ router.post('/projects/:pid/sessions/:sid/messages', express.json({ limit: '56mb
       const turnId = active.get(session.threadId);
       if (!turnId || turnId === 'unknown') throw new HttpError(409, '没有可追加的活动任务，请刷新');
       await bus.rpc('turn/steer', { threadId: session.threadId, expectedTurnId: turnId, input: await input() });
+      await recordMessageActivity(req, session);
       return res.json({ turnId, steered: true });
     }
     const loaded = await bus.rpc('thread/loaded/list');
@@ -330,7 +350,7 @@ router.post('/projects/:pid/sessions/:sid/messages', express.json({ limit: '56mb
     try {
       const result = await bus.rpc('turn/start', { threadId: session.threadId, input: await input() });
       started = true;
-      await projects.update(req.user.id, req.params.pid, p => { p.sessions.find(s => s.id === session.id).hasTurns = true; });
+      await recordMessageActivity(req, session);
       if (active.has(session.threadId)) active.set(session.threadId, result.turn.id);
       res.json({ turnId: result.turn.id });
     } catch (e) {
