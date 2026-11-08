@@ -6,7 +6,9 @@ import path from 'node:path';
 async function exists(file) { try { await access(file); return true; } catch { return false; } }
 async function command(args) {
   await new Promise((resolve, reject) => {
-    const child = spawn('npm', args, { stdio: 'inherit' });
+    const child = process.platform === 'win32'
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npm ${args.join(' ')}`], { stdio: 'inherit', windowsHide: true })
+      : spawn('npm', args, { stdio: 'inherit' });
     child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error(`npm ${args[0]} failed: ${code}`)));
   });
 }
@@ -23,9 +25,10 @@ async function filesIn(dir) {
   }
   return result;
 }
-const lockHash = await hashFiles(['package.json','package-lock.json']);
+const lockHash = `${process.platform}:${process.arch}:${process.versions.node.split('.')[0]}:${await hashFiles(['package.json','package-lock.json'])}`;
 const installMarker = 'node_modules/.web-lock-hash';
-if (!await exists(installMarker) || (await readFile(installMarker,'utf8')) !== lockHash) {
+const viteCommand = process.platform === 'win32' ? 'node_modules/.bin/vite.cmd' : 'node_modules/.bin/vite';
+if (!await exists(viteCommand) || !await exists(installMarker) || (await readFile(installMarker,'utf8')) !== lockHash) {
   await command(['ci','--no-audit','--no-fund']); await writeFile(installMarker,lockHash,'utf8');
 }
 const sourceHash = await hashFiles(['package-lock.json','vite.config.mjs',...await filesIn('client')]);

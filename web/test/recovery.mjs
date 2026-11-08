@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+throw new Error('旧恢复验收已停用，禁止用于生产桌面；请使用共享模式的隔离验收');
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';

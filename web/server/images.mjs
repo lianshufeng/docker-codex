@@ -1,13 +1,12 @@
-import { HttpError, requireValue } from './storage.mjs';
+import { requireValue } from './storage.mjs';
 
 export function decodeImages(images = []) {
-  requireValue(Array.isArray(images) && images.length <= 4, '每条消息最多附带 4 张图片');
+  requireValue(Array.isArray(images), '图片参数无效');
   return images.map(image => {
     requireValue(typeof image === 'string', '图片格式无效');
     const match = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image);
     requireValue(match, '仅支持 PNG、JPEG、WebP 和 GIF 图片');
     const bytes = Buffer.from(match[2], 'base64');
-    if (bytes.length > 2 * 1024 * 1024) throw new HttpError(413, '单张图片不能超过 2 MB');
     const type = match[1];
     const valid = type === 'png' ? bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
       : type === 'jpeg' ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
@@ -19,7 +18,7 @@ export function decodeImages(images = []) {
 }
 
 export function decodeFiles(files = []) {
-  requireValue(Array.isArray(files) && files.length <= 4, '每条消息最多附带 4 个文件');
+  requireValue(Array.isArray(files), '文件参数无效');
   return files.map(file => {
     requireValue(file && typeof file === 'object' && typeof file.name === 'string' && typeof file.data === 'string', '文件格式无效');
     let name = file.name.normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_').replace(/^[. ]+|[. ]+$/g, '');
@@ -27,7 +26,6 @@ export function decodeFiles(files = []) {
     const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(file.data);
     requireValue(match, '文件内容无效');
     const bytes = Buffer.from(match[2], 'base64');
-    if (bytes.length > 10 * 1024 * 1024) throw new HttpError(413, '单个文件不能超过 10 MB');
     requireValue(bytes.toString('base64') === match[2], '文件内容无效');
     const extension = /\.(png|jpe?g|webp|gif)$/i.exec(name)?.[1].toLowerCase();
     const image = match[1].startsWith('image/') || Boolean(extension);

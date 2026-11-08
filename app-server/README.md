@@ -1,6 +1,6 @@
 # Codex app-server MQTT 服务
 
-服务由独立 Mosquitto Broker 和 Codex 容器组成，Codex 容器内的桥接进程管理一个 app-server 子进程。独立 CLI Compose 位于根目录 `docker-compose-cli.yaml`。用户与线程 ID 的对应关系由业务后端维护。
+服务由独立 Mosquitto Broker 和 Codex 容器组成，Codex 容器内的桥接进程管理一个 app-server 子进程。独立 CLI Compose 位于根目录 `docker-compose-cli.yaml`。Web 示例直接读取远端线程并按 cwd 分组，多个登录用户共享所有业务数据。
 
 ## 启动
 
@@ -42,11 +42,24 @@ Mosquitto 镜像由 Compose 的 image 配置。Broker 默认仅映射宿主机�
 
 ## 协议
 
+Web 和新客户端统一使用桌面兼容接口，业务请求直接沿用 app-server JSON-RPC。旧客户端仍可使用下文的信封接口。从旧镜像部署时，需要构建包含当前桥接代码的镜像，再重建 app-server 容器。
+
+| Topic | 统一接口 |
+|---|---|
+| `codex/+/status` | 发现就绪实例。仅选择唯一同时满足 `attached=true` 和 `writerReady=true` 的实例。 |
+| `codex/<实例>/command` | 发布 `{ "id": "客户端唯一请求ID", "method": "model/list", "params": {} }`，QoS 1，禁止保留消息。 |
+| `codex/<实例>/reply/<id>` | JSON-RPC 响应或桥接错误。以主题和请求 ID 关联。 |
+| `codex/<实例>/observed/output` | JSON-RPC 通知及反向请求。 |
+
+请求 ID 使用 1–64 个字母、数字、下划线或连字符。反向请求的结果通过 `rpc/respond` 提交，参数为 `{ "requestId": 原反向请求ID, "result": {} }`。新桥在状态中公布 `protocolVersion: 1`、`runId`、`methods` 和 `maxRequestBytes`。`methods` 为 `*` 表示透传，由 app-server 判定支持的方法。旧桌面桥使用相同主题，但省略能力声明。客户端在发送超时或断线后应先查询状态，避免自动重放。Broker 须允许状态发现，业务读写仍按实例主题授权。
+
 使用 MQTT 5。同一实例只由一个可信业务后端协调输入，确保在途 JSON-RPC 请求 ID 唯一。Broker 用户名等于实例 ID，ACL 限制其访问 `codex/<用户名>/#`。其他租户需要各自账号、实例和隔离的数据目录。不要把此账号直接分发给终端用户。
 
 | Topic | 说明 |
 |---|---|
-| `codex/admin/in` | 业务后端发送请求、通知及对 Codex 反向请求的响应 |
+| `codex/admin/command` | 标准 app-server JSON-RPC 请求、通知及反向请求响应 |
+| `codex/admin/reply/<id>` | 标准请求的直接响应 |
+| `codex/admin/in` | 兼容旧客户端的请求信封 |
 | `codex/admin/out` | 桥接发布原始 RPC 消息或桥接错误 |
 | `codex/admin/status` | 保留的状态，包含 state、runId、time；异常断线的遗嘱为 offline |
 
@@ -83,9 +96,10 @@ Mosquitto 镜像由 Compose 的 image 配置。Broker 默认仅映射宿主机�
 
 ## 异常和容量边界
 
-- 输入最大 1 MiB、stdout 单行最大 1 MiB。
-- 输入待写缓冲最大 8 MiB；输出缓冲最大 4096 条且不超过 8 MiB。
-- 去重最多保存 10000 个未过期标识，满时拒绝新输入，不淘汰仍有效的标识。
+- 标准 JSON-RPC 桥接不按业务方法或固定消息大小裁剪，MQTT Broker 和进程背压负责保护资源。大文件使用独立 MQTT 二进制分块接口，块大小由状态能力声明。
+- `status.fileTransfer` 声明版本、块大小和文件上限。请求主题为 `codex/<实例>/files/request/<请求ID>`，对应回包为 `files/reply/<请求ID>`。请求和响应均使用 QoS 1，关闭 retain。数据包依次包含 4 字节大端 JSON 头长度、UTF-8 JSON 头和可选二进制块。上传按 `begin`、`write`、`finish` 操作，`status` 查询进度，`abort` 取消。下载用 `open` 获取版本和大小，`read` 按偏移读取并校验版本。
+- 输入待写及输出缓冲采用背压，队列耗尽时报告桥接错误并停止继续接收。
+- 标准 `command` 通道不设置业务请求数量、方法或 JSON 大小上限；MQTT 协议最大报文和进程背压仍然适用。
 - Broker 短时断线会重连并重新订阅，输出暂存在内存；订阅成功后重新发布就绪状态。调用方也应等重新订阅和新就绪事件后发指令。
 - 输出缓冲耗尽时服务明确退出，由 Compose 重启；不静默丢事件并宣称完成。
 - app-server 异常退出后约 2 秒重启，生成新 runId。旧 runId 指令被拒绝。

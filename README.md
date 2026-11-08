@@ -6,7 +6,7 @@
 
 ## 效果图
 
-**项目与会话** · 每个账号可以创建多个项目，一个项目下可以开多个会话。
+**项目与会话** · 多个账号共享执行端的会话，按工作目录分组，一个目录下可以开多个会话。
 
 ![AI 助手工作台，左侧展示多个项目和会话](docs/screenshots/workspace.png)
 
@@ -48,19 +48,25 @@ docker compose -f docker-compose.yaml restart codex-app-server
 docker compose -f web/docker-compose.yml up -d
 ```
 
-首次启动会安装锁定的依赖并构建前端。打开 [http://localhost:3000](http://localhost:3000)，注册账号，然后按 **新建项目 → 新会话 → 发送消息** 试用。可以发「生成一份三条待办的发布清单，保存为 launch-checklist.md」，再点右上角 **文件** 查看并下载成果。 [Web 配置与验收](web/README.md)
+启动前将 `web/config.json` 的 `mqtt.url` 设置为容器可访问的 `mqtt://host.docker.internal:1883`。首次启动会安装锁定的依赖并构建前端。打开 [http://localhost:3000](http://localhost:3000)，注册账号，已有会话会从执行端直接读取；新建项目时，Linux 执行端只需填写项目名称，自动在 `/workspace/项目名` 创建目录和会话；Windows 执行端通过文件夹选择器点选已有目录，无需输入绝对路径。可以发「生成一份三条待办的发布清单，保存为 launch-checklist.md」，再点右上角 **文件** 查看并下载成果。 [Web 配置与验收](web/README.md)
+
+Web 通过统一的 MQTT 接口连接 Docker 或 Windows 桌面。两种桥都转发标准 app-server JSON-RPC，Web 只需切换 MQTT 地址、端口和凭据。会话来自 app-server，文件由执行端提供，Web 无需挂载工作目录。完整文件功能依赖桥支持 `fs/*` 转发和分块传输。 [Windows 启动与限制](web/README.md#连接-windows-桌面)
+
+Windows 原生启动使用 `mqtt://127.0.0.1:1883`，Docker 内访问宿主机使用 `mqtt://host.docker.internal:1883`。切换运行平台时，启动脚本自动重新安装对应平台的依赖。
 
 ## 功能与工作原理
 
-- **多用户、多项目、多会话**。每个账号管理自己的项目。项目内的各个会话有独立历史，共享该项目的文件。
-- **任务与文件**。支持流式回复、追加要求、停止任务、通过输入框「+」多选本地文件、粘贴图片和预览回复图片。附件随消息自动引用，保存在 Web 与 AI 助手共享的项目目录 `attachments/YYYYMMDD/`；日期按 `web/config.json` 的 `attachmentTimeZone`（示例为 `Asia/Tokyo`）生成，同名文件依次追加数字，例如 `报告1.pdf`。每条消息最多 4 个附件，普通文件单个不超过 10 MB，图片支持 PNG、JPEG、WebP、GIF，单张不超过 2 MB。文件面板使用文件夹与文件图标，支持浏览、下载文件，以及删除文件或整个文件夹；删除文件夹会移除全部内容，任务运行期间禁止删除。聊天中的附件引用支持下载，已删除附件会提示不存在。Web 默认允许所有用户合计运行 4 个任务，同一会话同时运行 1 个任务。
+- **多用户、多项目、多会话**。账号只用于登录，所有账号共享同一个 app-server 的会话、历史、任务与文件；项目按线程 `cwd` 分组，不维护本地项目和会话映射。目录分组不提供改名和整体删除，会话归档保留历史、目录和文件。会话名称通过 `thread/name/set` 保存并读取确认，旧桌面桥可创建未命名会话，命名功能需更新连接服务。
+- **任务与文件**。支持流式回复、追加要求、停止任务、通过输入框「+」多选本地文件、粘贴图片和预览回复图片。小文件通过 app-server `fs/*` 管理，大文件使用统一 MQTT 分块传输后保存到执行端 `attachments/`，支持进度、SHA-256 校验、失败续传、Range 下载和中断清理。附件数量和容量由执行端及 MQTT 背压决定，图片支持 PNG、JPEG、WebP、GIF。文件面板支持浏览、下载和删除，目录中有任务运行时禁止删除。业务方法由 app-server 决定，桥只做标准协议转发。
+- 创建或归档会话经执行端确认后，界面立即更新，项目列表在后台同步。
+- 回复支持 GitHub 风格 Markdown，包括表格、任务列表、删除线和脚注，也支持代码高亮和 LaTeX 公式。
 - **手机操作**。窗口宽度不超过 800px 时，项目菜单默认收起，左上角按钮打开菜单，选择会话后自动关闭。项目行展开会话列表，右上角打开文件抽屉，点击遮罩或关闭按钮返回聊天。触屏输入支持回车换行，点击发送按钮发送消息。
 - **查找会话**。侧栏可按项目名或会话名搜索，最近会话默认显示 8 条，点击「查看更多会话」每次追加 20 条。会话按最近发送消息或任务完成时间排序，旧会话用创建时间兜底。项目列表保留分组浏览，当前项目默认展开，其他项目默认折叠。
-- **部署方式**。Web 和 Codex 共用宿主机的 `workspace/`，Web 使用现成的 Node.js 镜像和文件存储。所有账号共享一个 app-server 和运行身份，适用于可信用户的示例环境。
+- **部署方式**。Web 使用现成的 Node.js 镜像或本机 Node.js，仅登录数据保存在本地 JSON；Codex 自行管理工作目录。所有账号共享一个 app-server 和运行身份，适用于可信用户，无用户数据隔离。
 
 浏览器通过 HTTP 和 WebSocket 连接 Web 后端。业务后端通过 MQTT 与桥接进程通信，桥接进程再通过标准输入和输出与 Codex app-server 交换 JSON-RPC 消息。MQTT 凭据由业务后端持有。
 
-接入时，先订阅 `codex/admin/status` 和 `codex/admin/out`，等状态为 `ready` 后，用当前 `runId` 向 `codex/admin/in` 发送请求，例如 `thread/start` 或 `turn/start`，再从 `out` 读取响应和流式事件。 [本仓库 MQTT 信封与主题](app-server/README.md#协议) · [OpenAI 官方 Codex App Server API 文档](https://developers.openai.com/codex/app-server)
+接入时，先订阅 `codex/+/status`，发现唯一 `attached=true`、`writerReady=true` 的实例，向 `codex/<实例>/command` 发送 app-server 请求，通过 `reply/<id>` 关联响应、`observed/output` 接收流式事件。Docker 桥继续兼容原有 `in/out` 信封接口。 [MQTT 主题与协议](app-server/README.md#协议) · [OpenAI 官方 Codex App Server API 文档](https://developers.openai.com/codex/app-server)
 
 <details>
 <summary>展开 Codex CLI、镜像工具与高级配置</summary>
@@ -69,7 +75,7 @@ docker compose -f web/docker-compose.yml up -d
 
 独立 CLI 使用根目录 `docker-compose-cli.yaml`，命令需通过 `-f` 指定该文件。MQTT 服务模式使用默认的 `docker-compose.yaml`，配置和消息协议见 [app-server 服务说明](app-server/README.md)。
 
-Web 前后端示例位于 [web/](web/README.md)，使用该目录下的 `docker-compose.yml` 启动，与 Codex 共享 workspace，不需要数据库或构建新镜像。
+Web 前后端示例位于 [web/](web/README.md)，使用该目录下的 `docker-compose.yml` 启动，无需工作目录挂载、数据库或构建新镜像。
 
 镜像已预装 Node.js Playwright 与 Chromium headless shell，无需在任务中安装浏览器。可直接执行 `playwright screenshot --browser chromium https://example.com screenshot.png`，或通过 `require('playwright')` 使用默认无头浏览器。`codex-home/AGENTS.md` 提供运行说明，随现有目录挂载进入服务；不要将多个工具探测命令的非零退出码误认为浏览器缺失。
 

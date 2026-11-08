@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+throw new Error('旧用户隔离验收已停用，请运行 test/shared-acceptance.mjs，并使用隔离测试端口');
 import { mkdir, writeFile, readFile, symlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';

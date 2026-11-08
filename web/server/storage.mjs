@@ -13,7 +13,7 @@ export function identifier(value) {
   return value;
 }
 export function displayName(value) {
-  requireValue(typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 80, '名称须为 1–80 个字符');
+  requireValue(typeof value === 'string' && value.trim().length > 0, '名称不能为空');
   return value.trim();
 }
 export class Locks {
@@ -103,6 +103,9 @@ export class Projects {
     requireValue(typeof relative === 'string' && !relative.includes('\0') && !relative.includes('\\') && !path.posix.isAbsolute(relative), '文件路径无效');
     const segments = relative.split('/').filter(Boolean);
     requireValue(segments.every(s => s !== '.' && s !== '..' && !s.startsWith('.web-')), '禁止访问内部文件或上级目录');
+    if (process.platform === 'win32') {
+      requireValue(segments.every(s => !/[<>:"|?*]/.test(s) && !/[. ]$/.test(s) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(s)), '禁止访问 Windows 特殊路径');
+    }
     requireValue(allowRoot || segments.length > 0, '不能删除项目根目录');
     let target = root;
     for (const segment of segments) {

@@ -6,7 +6,7 @@ Run Codex with Docker Compose so it can execute commands, edit code, and generat
 
 ## Screenshots
 
-**Projects and sessions** · Each account can create multiple projects, with multiple chat sessions per project.
+**Projects and sessions** · Accounts share the execution service's sessions, grouped by working directory, with multiple sessions per directory.
 
 ![AI Assistant workspace with multiple projects and sessions in the sidebar](docs/screenshots/workspace.png)
 
@@ -48,19 +48,25 @@ Keep the services from step 1 running, then run:
 docker compose -f web/docker-compose.yml up -d
 ```
 
-The first startup installs locked dependencies and builds the frontend. Open [http://localhost:3000](http://localhost:3000), register, create a project, and start a chat. Try asking for a three-item launch checklist saved as `launch-checklist.md`, then open **文件** (Files) in the upper right to view and download it. [Web configuration and verification (Chinese)](web/README.md)
+Before starting, set `mqtt.url` in `web/config.json` to `mqtt://host.docker.internal:1883`, reachable from the Web container. The first startup installs locked dependencies and builds the frontend. Open [http://localhost:3000](http://localhost:3000) and register. Existing sessions are read directly from the execution service; to create a project on Linux, enter a name and Web creates `/workspace/<name>` and a session. For a Windows execution service, click through drives and folders to select an existing directory; no absolute-path input is required. Try asking for a three-item launch checklist saved as `launch-checklist.md`, then open **文件** (Files) to download it. [Web configuration and verification (Chinese)](web/README.md)
+
+Web uses one MQTT interface for Docker and Windows desktop. Both bridges forward standard app-server JSON-RPC, so only the MQTT address, port, and credentials change. Sessions come from app-server and files from the execution endpoint. Web needs no workspace mount. Full file support requires bridge forwarding for `fs/*` and chunked transfers. [Windows setup and limitations (Chinese)](web/README.md#连接-windows-桌面)
+
+Native Windows uses `mqtt://127.0.0.1:1883`. Containers reach the host through `mqtt://host.docker.internal:1883`. The startup script automatically reinstalls platform-specific dependencies when switching runtime platforms.
 
 ## Features and how it works
 
-- **Multiple users, projects, and sessions.** Each account manages its own projects. Sessions keep separate chat histories and share files within the same project.
-- **Tasks and files.** Stream replies, send follow-up instructions, stop tasks, select multiple local files with the composer’s “+” button, paste images, and preview images in replies. Attachments are automatically referenced in the message and saved under `attachments/YYYYMMDD/` in the project directory shared by Web and the AI assistant. Dates use `attachmentTimeZone` in `web/config.json` (`Asia/Tokyo` in the example). Duplicate names receive numeric suffixes, such as `report1.pdf`. Each message accepts up to four attachments, with a 10 MB limit per regular file and a 2 MB limit per PNG, JPEG, WebP, or GIF image. The file panel uses standard folder and file icons and supports browsing, downloading files, and deleting files or entire folders. Folder deletion removes all contents; deletion is blocked while tasks are running. Attachment references in chat support downloads and report missing files after deletion. The Web service defaults to four concurrent tasks across all users, with one active task per session.
+- **Multiple users, projects, and sessions.** Accounts provide login only. All accounts share one app-server's sessions, history, tasks, and files. Projects group threads by `cwd`; Web keeps no project or session mapping. Directory groups cannot be renamed or deleted as a whole. Archiving a session preserves its history, directory, and files. Session names are saved through `thread/name/set` and verified by reading them back. Legacy desktop bridges can create unnamed sessions; naming requires an updated bridge.
+- **Tasks and files.** Stream replies, send follow-up instructions, stop tasks, attach files with “+”, paste images, and preview reply images. Small files use app-server `fs/*`; large files use shared MQTT chunk transport with progress, SHA-256 verification, retry resume, HTTP Range downloads, and interrupted-transfer cleanup. Attachment count and capacity follow the execution endpoint and MQTT backpressure. PNG, JPEG, WebP, and GIF images are supported. Browse, download, and delete files. Business methods are decided by app-server, while the bridge forwards the standard protocol.
 - **Mobile use.** At viewport widths up to 800px, the project menu starts closed. Open it from the top-left button, expand a project to browse its sessions, and select a session to close the drawer. Open files from the top-right button and dismiss either drawer using its close button or backdrop. In the compact layout, Enter adds a new line and the send button submits the message.
+- After the execution service confirms session creation or archiving, the interface updates immediately and refreshes the project list in the background.
+- Replies support GitHub Flavored Markdown, including tables, task lists, strikethrough, and footnotes, plus code highlighting and LaTeX equations.
 - **Find sessions.** Search by project or session name in the sidebar. Recent sessions initially show eight entries, with twenty more revealed per click. Sessions are ordered by message submission or task completion time, with creation time used for older entries. Projects remain available below, with the current project expanded by default and other projects collapsed.
-- **Deployment.** Web and Codex share the host's `workspace/` directory. Web uses an existing Node.js image and file-based storage. All accounts share one app-server and one execution identity. The example is intended for trusted users.
+- **Deployment.** Web runs in an existing Node.js image or native Node.js and stores only login data locally in JSON. Codex manages its own working directories. All accounts share one app-server and execution identity, with no user data isolation. Use this example with trusted users.
 
 The browser connects to the Web backend over HTTP and WebSocket. The backend talks to the bridge over MQTT, and the bridge exchanges JSON-RPC messages with Codex app-server over standard input and output. MQTT credentials stay with the backend.
 
-Subscribe to `codex/admin/status` and `codex/admin/out`. Once the state is `ready`, use the current `runId` to send requests such as `thread/start` or `turn/start` to `codex/admin/in`. Read responses and streaming events from `out`. [MQTT envelope and topics (Chinese)](app-server/README.md#协议) · [Official OpenAI Codex App Server API documentation](https://developers.openai.com/codex/app-server)
+Subscribe to `codex/+/status` and discover exactly one instance with `attached=true` and `writerReady=true`. Send app-server requests to `codex/<instance>/command`, correlate replies through `reply/<id>`, and receive events through `observed/output`. The Docker bridge also retains the legacy `in/out` envelope interface. [MQTT topics and protocol (Chinese)](app-server/README.md#协议) · [Official OpenAI Codex App Server API documentation](https://developers.openai.com/codex/app-server)
 
 <details>
 <summary>Expand CLI, image tools, and advanced configuration</summary>

@@ -85,6 +85,7 @@ ENV HOME=/home/node
 COPY app-server/package*.json /opt/codex-mqtt/
 RUN cd /opt/codex-mqtt && npm ci --omit=dev && npm cache clean --force
 COPY app-server/*.mjs /opt/codex-mqtt/
+COPY app-server/file_transfer.py /opt/codex-mqtt/
 
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 

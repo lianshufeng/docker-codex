@@ -9,16 +9,25 @@
     "dev": "vite --host 0.0.0.0",
     "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
-    "acceptance": "node test/acceptance.mjs"
+    "acceptance": "node test/shared-acceptance.mjs"
   },
   "dependencies": {
     "express": "5.1.0",
+    "highlight.js": "11.12.0",
+    "katex": "0.19.1",
     "lucide-react": "0.468.0",
     "mqtt": "5.15.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "react-markdown": "10.1.0",
+    "rehype-highlight": "7.0.2",
+    "rehype-katex": "7.0.1",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
     "ws": "8.22.1"
+  },
+  "overrides": {
+    "katex": "$katex"
   },
   "devDependencies": {
     "@types/react": "19.2.2",
