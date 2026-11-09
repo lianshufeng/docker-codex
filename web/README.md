@@ -41,6 +41,7 @@ docker compose down
 MQTT 默认公开示例账号为 admin / admin@2026，与 `mosquitto/config/mqtt.json` 和 Broker 密码文件保持一致。更换账号密码时同步修改这三个位置，实际部署密码不要提交 Git。浏览器不会接收 MQTT 凭据。
 
 - `port`：Node 服务端监听端口，修改后同步修改 Compose 端口。
+- `allowRegistration`：默认 `true`，省略时也允许注册。设为 `false` 并重启 Web 服务后，登录页隐藏注册入口，注册接口返回 HTTP 403，已有账号仍可登录。
 - `dataDirectory`：仅用户和登录数据目录，相对于 web/；原 `workspaceRoot`、`codexWorkspaceRoot` 不再使用。
 - `sandbox`、`approvalPolicy`：新线程的执行策略。默认沿用验收用的 danger-full-access / never，可按自己的环境调整。
 

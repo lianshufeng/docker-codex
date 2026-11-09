@@ -48,7 +48,7 @@ docker compose -f docker-compose.yaml restart codex-app-server
 docker compose -f web/docker-compose.yml up -d
 ```
 
-启动前将 `web/config.json` 的 `mqtt.url` 设置为容器可访问的 `mqtt://host.docker.internal:1883`。首次启动会安装锁定的依赖并构建前端。打开 [http://localhost:3000](http://localhost:3000)，注册账号，已有会话会从执行端直接读取；新建项目时，Linux 执行端只需填写项目名称，自动在 `/workspace/项目名` 创建目录和会话；Windows 执行端通过文件夹选择器点选已有目录，无需输入绝对路径。可以发「生成一份三条待办的发布清单，保存为 launch-checklist.md」，再点右上角 **文件** 查看并下载成果。 [Web 配置与验收](web/README.md)
+启动前将 `web/config.json` 的 `mqtt.url` 设置为容器可访问的 `mqtt://host.docker.internal:1883`。首次启动会安装锁定的依赖并构建前端。打开 [http://localhost:3000](http://localhost:3000)。默认允许自行注册，设定 `web/config.json` 的 `allowRegistration` 为 `false` 并重启 Web 服务可关闭注册。已有账号仍可登录。已有会话会从执行端直接读取；新建项目时，Linux 执行端只需填写项目名称，自动在 `/workspace/项目名` 创建目录和会话；Windows 执行端通过文件夹选择器点选已有目录，无需输入绝对路径。可以发「生成一份三条待办的发布清单，保存为 launch-checklist.md」，再点右上角 **文件** 查看并下载成果。 [Web 配置与验收](web/README.md)
 
 Web 通过统一的 MQTT 接口连接 Docker 或 Windows 桌面。两种桥都转发标准 app-server JSON-RPC，Web 只需切换 MQTT 地址、端口和凭据。会话来自 app-server，文件由执行端提供，Web 无需挂载工作目录。完整文件功能依赖桥支持 `fs/*` 转发和分块传输。 [Windows 启动与限制](web/README.md#连接-windows-桌面)
 

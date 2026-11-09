@@ -11,6 +11,7 @@ import { sharedApi } from './shared-api.mjs';
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const configFile = process.argv[2] ? path.resolve(process.argv[2]) : path.join(appRoot, 'config.json');
 const config = JSON.parse(await readFile(configFile, 'utf8'));
+const allowRegistration = config.allowRegistration !== false;
 const auth = new Auth(path.resolve(appRoot, config.dataDirectory, 'users.json'));
 await auth.init();
 const bus = new DesktopBus(config.mqtt);
@@ -40,6 +41,7 @@ app.use((req, res, next) => {
   next();
 });
 const router = express.Router();
+router.get('/auth/config', (req, res) => res.json({ allowRegistration }));
 const limits = new Map();
 router.use('/auth', (req, res, next) => {
   const key = req.socket.remoteAddress;
@@ -50,6 +52,7 @@ router.use('/auth', (req, res, next) => {
 }, express.json());
 const cookie = (res, token, req) => res.cookie('codex_session', token, { httpOnly: true, sameSite: 'strict', secure: req.secure, path: '/', maxAge: 7 * 86400000 });
 router.post('/auth/register', async (req, res) => {
+  if (!allowRegistration) return res.status(403).json({ error: '账号注册已关闭' });
   const user = await auth.register(req.body.username, req.body.password);
   res.status(201).json({ user });
 });
