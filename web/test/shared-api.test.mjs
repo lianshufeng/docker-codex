@@ -5,6 +5,72 @@ import express from 'express';
 import { sharedApi } from '../server/shared-api.mjs';
 import { projectId } from '../server/app-workspace.mjs';
 
+test('interactive requests validate answers and forward the response for each protocol', async () => {
+  const bus = new EventEmitter();
+  bus.state = { runId: 'test', state: 'ready' };
+  bus.ready = () => true;
+  const cwd = '/workspace/test', published = [];
+  bus.rpc = async (method, { threadId }) => {
+    assert.equal(method, 'thread/read');
+    return { thread: { id: threadId, cwd } };
+  };
+  bus.publish = async payload => { published.push(payload); };
+  const app = express();
+  app.use(express.json(), sharedApi(bus, {}, () => {}).router);
+  app.use((error, req, res, next) => res.status(error.status || 500).json({ error: error.message }));
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise(resolve => server.once('listening', resolve));
+    const submit = (threadId, body) => fetch(
+      `http://127.0.0.1:${server.address().port}/projects/${projectId(cwd)}/sessions/${threadId}/approval`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const ask = (id, questions) => bus.emit('notification', {
+      id, method: 'item/tool/requestUserInput', params: { threadId: 'target', questions }
+    }, bus.state.runId);
+    const color = { id: 'color', options: [{ label: '蓝色' }] };
+    ask(1, [color]);
+    assert.equal((await submit('other', { requestId: 1, answers: { color: '蓝色' } })).status, 404);
+    assert.equal((await submit('target', { requestId: 1, answers: { color: '红色' } })).status, 400);
+    assert.equal((await submit('target', { requestId: 1, answers: { color: '蓝色' } })).status, 200);
+    ask(2, [color, { id: 'size', options: [{ label: '小' }], isOther: true }]);
+    assert.equal((await submit('target', { requestId: 2, answers: { color: '蓝色' } })).status, 400);
+    const response = { requestId: 2, answers: { color: '蓝色', size: '大' } };
+    const attempts = await Promise.all([submit('target', response), submit('target', response)]);
+    assert.deepEqual(attempts.map(result => result.status).sort(), [200, 404]);
+    const elicit = (id, params) => bus.emit('notification', {
+      id, method: 'mcpServer/elicitation/request', params: { threadId: 'target', turnId: null, ...params }
+    }, bus.state.runId);
+    elicit(3, { mode: 'form', requestedSchema: { type: 'object', required: ['colors', 'count', 'enabled'], properties: {
+      colors: { type: 'array', minItems: 2, items: { anyOf: [{ const: 'blue', title: '蓝色' }, { const: 'red', title: '红色' }] } },
+      count: { type: 'integer', minimum: 1 }, enabled: { type: 'boolean' }, email: { type: 'string', format: 'email' }
+    } } });
+    bus.emit('notification', { method: 'turn/completed', params: {
+      threadId: 'target', turn: { id: 'unrelated' }
+    } }, bus.state.runId);
+    const content = { colors: ['blue', 'red'], count: 2, enabled: false };
+    for (const invalid of [{ colors: ['blue', 'blue'] }, { count: 1.5 }, { email: 'bad' }, { unexpected: true }]) {
+      assert.equal((await submit('target', { requestId: 3, action: 'accept', content: { ...content, ...invalid } })).status, 400);
+    }
+    assert.equal((await submit('target', { requestId: 3, action: 'accept', content })).status, 200);
+    elicit(4, { mode: 'form', requestedSchema: { type: 'object', properties: { nested: { type: 'object' } } } });
+    assert.equal((await submit('target', { requestId: 4, action: 'accept', content: {} })).status, 400);
+    assert.equal((await submit('target', { requestId: 4, action: 'cancel' })).status, 200);
+    elicit(5, { mode: 'url', url: 'javascript:alert(1)' });
+    assert.equal((await submit('target', { requestId: 5, action: 'accept' })).status, 400);
+    assert.equal((await submit('target', { requestId: 5, action: 'decline' })).status, 200);
+    elicit(6, { mode: 'url', url: 'https://example.com/' });
+    assert.equal((await submit('target', { requestId: 6, action: 'accept' })).status, 200);
+    assert.deepEqual(published, [
+      { id: 1, result: { answers: { color: { answers: ['蓝色'] } } } },
+      { id: 2, result: { answers: { color: { answers: ['蓝色'] }, size: { answers: ['大'] } } } },
+      { id: 3, result: { action: 'accept', content, _meta: null } },
+      { id: 4, result: { action: 'cancel', content: null, _meta: null } },
+      { id: 5, result: { action: 'decline', content: null, _meta: null } },
+      { id: 6, result: { action: 'accept', content: null, _meta: null } }
+    ]);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('a multi-step file operation stops if the MQTT endpoint changes mid-request', async () => {
   const bus = new EventEmitter(); bus.state = { runId: 'first', state: 'ready' };
   bus.ready = () => true; bus.supports = () => true;

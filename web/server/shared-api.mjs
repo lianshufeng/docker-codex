@@ -1,4 +1,5 @@
 import express from 'express';
+import { externalUrl, formFields, validField } from '../elicitation.mjs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -42,7 +43,11 @@ export function sharedApi(bus, config, broadcast) {
     if (message.method === 'turn/started') reservations.set(id, params.turn.id);
     if (message.method === 'turn/completed') {
       reservations.delete(id);
-      for (const [key, approval] of approvals) if (approval.params?.threadId === id) approvals.delete(key);
+      for (const [key, approval] of approvals) {
+        if (approval.params?.threadId !== id) continue;
+        if (approval.method === 'mcpServer/elicitation/request' && approval.params.turnId !== params.turn.id) continue;
+        approvals.delete(key);
+      }
     }
     if (message.id !== undefined) approvals.set(String(message.id), message);
     broadcast(null, { type: 'rpc', sessionId: id, payload: message });
@@ -292,11 +297,51 @@ export function sharedApi(bus, config, broadcast) {
     res.json({ ok: true });
   });
   router.post('/projects/:pid/sessions/:sid/approval', async (req, res) => {
-    const t = await thread(req), approval = approvals.get(String(req.body.requestId));
-    if (!approval || approval.params?.threadId !== t.id) throw new HttpError(404, '审批已结束');
-    requireValue(['accept', 'decline', 'cancel'].includes(req.body.decision), '审批决定无效');
-    await bus.publish({ id: approval.id, result: { decision: req.body.decision } });
-    approvals.delete(String(approval.id)); res.json({ ok: true });
+    const t = await thread(req), key = String(req.body.requestId), pending = approvals.get(key);
+    await locks.run(`response:${key}`, async () => {
+      if (!pending || approvals.get(key) !== pending || pending.params?.threadId !== t.id) {
+        throw new HttpError(404, '此请求已结束');
+      }
+      let result;
+      if (pending.method === 'item/tool/requestUserInput') {
+        const { answers } = req.body;
+        const questions = pending.params.questions;
+        requireValue(answers && typeof answers === 'object' && !Array.isArray(answers) &&
+          Object.keys(answers).length === questions.length, '请回答所有问题');
+        result = { answers: Object.fromEntries(questions.map(question => {
+          const answer = Object.hasOwn(answers, question.id) ? answers[question.id] : null;
+          requireValue(typeof answer === 'string' && answer.trim() &&
+            (!question.options?.length || question.isOther || question.options.some(option => option.label === answer)),
+          '请选择有效选项或填写答案');
+          return [question.id, { answers: [answer] }];
+        })) };
+      } else if (pending.method === 'mcpServer/elicitation/request') {
+        const { action, content } = req.body;
+        requireValue(['accept', 'decline', 'cancel'].includes(action), '表单操作无效');
+        result = { action, content: null, _meta: null };
+        if (action === 'accept' && pending.params.mode === 'form') {
+          const fields = formFields(pending.params.requestedSchema);
+          requireValue(fields, '此表单包含暂不支持的题型');
+          requireValue(content && typeof content === 'object' && !Array.isArray(content) &&
+            Object.keys(content).every(name => fields.some(field => field.name === name)), '表单字段无效');
+          for (const field of fields) {
+            const present = Object.hasOwn(content, field.name);
+            requireValue(present ? validField(field, content[field.name]) : !field.required,
+              `请检查「${field.title || field.name}」的答案`);
+          }
+          result.content = content;
+        } else if (action === 'accept') {
+          requireValue(pending.params.mode === 'url' && externalUrl(pending.params.url), '外部链接无效');
+        }
+      } else {
+        requireValue(pending.method.endsWith('/requestApproval'), '此请求类型暂不支持');
+        requireValue(['accept', 'decline', 'cancel'].includes(req.body.decision), '审批决定无效');
+        result = { decision: req.body.decision };
+      }
+      await bus.publish({ id: pending.id, result });
+      if (approvals.get(key) === pending) approvals.delete(key);
+    });
+    res.json({ ok: true });
   });
   router.get('/projects/:pid/files', async (req, res) => {
     const { target, stat } = await checkedPath(bus, root(req), String(req.query.path || ''));

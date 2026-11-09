@@ -70,3 +70,7 @@
 .project-location p,.project-location small{color:#999;font-size:12px;line-height:1.7}.project-location-path{display:block;margin:12px 0;overflow-wrap:anywhere;color:#aaa;font-size:12px}.directory-toolbar{display:flex;gap:8px}.directory-list{max-height:260px;overflow:auto;margin:12px 0;border:1px solid #3b3b3b;border-radius:8px}.directory-list>button{display:flex;align-items:center;gap:10px;width:100%;padding:11px 12px;text-align:left}.directory-list>button:hover{background:#333}.directory-list>button span{overflow-wrap:anywhere;min-width:0}.directory-list>p{padding:0 12px}
 .breadcrumb{min-width:0}.breadcrumb>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-toggle{flex-shrink:0}
 @media(max-width:800px){.sidebar-search input{font-size:16px;min-height:44px}.recent-session,.load-more-sessions{min-height:44px}}
+.user-input-request fieldset{min-width:0;margin:12px 0;border:1px solid #555;border-radius:6px;overflow-wrap:anywhere}
+.user-input-request label{display:grid;gap:8px}
+.user-input-request select,.user-input-request input:not([type=hidden]):not([type=checkbox]){width:100%;min-width:0;min-height:36px;padding:6px 8px;color:inherit;background:#222;border:1px solid #666;border-radius:6px}
+.user-input-request .elicitation-choice{display:flex;align-items:center;min-height:30px}
