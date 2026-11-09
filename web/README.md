@@ -14,6 +14,7 @@ docker compose -f docker-compose.yaml up -d
 
 ```bash
 cd web
+cp .config.json config.json
 docker compose up -d
 ```
 
@@ -36,7 +37,7 @@ docker compose down
 
 ## 配置
 
-直接编辑 `config.json`。仓库默认 `mqtt.url` 为 `mqtt://127.0.0.1:1883`；在 Docker 内运行 Web 时，启动前改为 `mqtt://host.docker.internal:1883`（Linux Compose 已添加宿主机网关）。Web 通过统一的 MQTT 接口发现唯一就绪的执行端。同一账号应只看到一个就绪实例。切换 Docker 或桌面仅修改 MQTT 地址、端口、账号和密码，没有模式开关。
+首次使用时将 `.config.json` 复制为 `config.json`，已有配置时跳过复制。PowerShell 可执行 `Copy-Item .config.json config.json`。之后直接编辑 `config.json`；该文件已加入 Git 忽略，仓库只跟踪示例 `.config.json`。示例的 `mqtt.url` 为 Docker 内可访问的 `mqtt://host.docker.internal:1883`（Linux Compose 已添加宿主机网关），本机运行时改为 `mqtt://127.0.0.1:1883`。Web 通过统一的 MQTT 接口发现唯一就绪的执行端。同一账号应只看到一个就绪实例。切换 Docker 或桌面仅修改 MQTT 地址、端口、账号和密码，没有模式开关。
 
 MQTT 默认公开示例账号为 admin / admin@2026，与 `mosquitto/config/mqtt.json` 和 Broker 密码文件保持一致。更换账号密码时同步修改这三个位置，实际部署密码不要提交 Git。浏览器不会接收 MQTT 凭据。
 

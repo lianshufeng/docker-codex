@@ -42,9 +42,10 @@ docker compose -f docker-compose.yaml restart codex-app-server
 
 ### 2. 启动 Web（AI 助手）
 
-保持上一步的服务运行，再执行：
+保持上一步的服务运行。首次启动先复制配置示例，已有配置时跳过复制：
 
 ```bash
+cp web/.config.json web/config.json
 docker compose -f web/docker-compose.yml up -d
 ```
 

@@ -5,6 +5,7 @@ __pycache__/
 !.env.example
 *.log
 /web/data/
+/web/config.json
 /web/dist/
 /web/test-results/
 /acceptance/.runtime/

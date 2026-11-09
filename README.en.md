@@ -42,9 +42,10 @@ For a backend-only integration, stop here. Connect to the broker at `mqtt://127.
 
 ### 2. Start the Web AI Assistant
 
-Keep the services from step 1 running, then run:
+Keep the services from step 1 running. Copy the example configuration before the first startup. Skip the copy if your configuration already exists:
 
 ```bash
+cp web/.config.json web/config.json
 docker compose -f web/docker-compose.yml up -d
 ```
 
