@@ -54,7 +54,13 @@
 .recent-sessions{padding:0 5px}
 .recent-session{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:10px;border-radius:8px;color:#999;min-width:0}
 .recent-session:hover,.recent-session.active{background:#292929;color:#eee}
-.recent-session>span{min-width:0;flex:1}
+.recent-session>span:not(.session-unread){min-width:0;flex:1}
+.recent-session>svg,.session-row>button>svg{flex:none}
+.session-spinner{animation:session-spin .9s linear infinite}
+@keyframes session-spin{to{transform:rotate(360deg)}}
+.recent-session>.session-unread,.session-row>button>.session-unread{display:grid;place-items:center;flex:none;width:15px}
+.session-unread::before{content:"";width:7px;height:7px;border-radius:50%;background:#79aaff}
+@media(prefers-reduced-motion:reduce){.session-spinner{animation:none}}
 .recent-session strong,.recent-session small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400}
 .recent-session strong{font-size:12px;line-height:1.5}
 .recent-session small{font-size:10px;color:#777;margin-top:3px}

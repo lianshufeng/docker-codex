@@ -62,6 +62,7 @@ Native Windows uses `mqtt://127.0.0.1:1883`. Containers reach the host through `
 - After the execution service confirms session creation or archiving, the interface updates immediately and refreshes the project list in the background.
 - Replies support GitHub Flavored Markdown, including tables, task lists, strikethrough, and footnotes, plus code highlighting and LaTeX equations.
 - **Find sessions.** Search by project or session name in the sidebar. Recent sessions initially show eight entries, with twenty more revealed per click. Sessions are ordered by message submission or task completion time, with creation time used for older entries. Projects remain available below, with the current project expanded by default and other projects collapsed.
+- **Session status.** The sidebar shows a spinner while a task is running. A blue unread dot appears when the task ends in another session or a hidden tab, and clears when you view that session. Unread markers are stored per browser and signed-in account.
 - **Deployment.** Web runs in an existing Node.js image or native Node.js and stores only login data locally in JSON. Codex manages its own working directories. All accounts share one app-server and execution identity, with no user data isolation. Use this example with trusted users.
 
 The browser connects to the Web backend over HTTP and WebSocket. The backend talks to the bridge over MQTT, and the bridge exchanges JSON-RPC messages with Codex app-server over standard input and output. MQTT credentials stay with the backend.

@@ -134,7 +134,7 @@ export function sharedApi(bus, config, broadcast) {
       if (!t.cwd) continue;
       const p = projectOf(t.cwd);
       if (!groups.has(p.id)) groups.set(p.id, p);
-      groups.get(p.id).sessions.push(sessionOf(t));
+      groups.get(p.id).sessions.push({ ...sessionOf(t), running: t.status?.type === 'active' || reservations.has(t.id) });
     }
     for (const p of groups.values()) p.sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     res.json({ projects: [...groups.values()] });

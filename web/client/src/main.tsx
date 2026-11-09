@@ -3,12 +3,12 @@ import { createRoot } from 'react-dom/client';
 import { ReplyMarkdown, ReturnedImage } from './reply-images';
 import { ProjectLocation, ProjectLocationValue } from './project-location';
 import { uploadFile } from './upload';
-import { Plus, Folder, FolderOpen, MessageSquare, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Archive, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, File, FileText } from 'lucide-react';
+import { Plus, Folder, FolderOpen, MessageSquare, LoaderCircle, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Archive, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, File, FileText } from 'lucide-react';
 import './style.css';
 import './images.css';
 
 type User = { id: string; username: string };
-type Session = { id: string; threadId: string; name: string; createdAt: string; updatedAt?: string };
+type Session = { id: string; threadId: string; name: string; createdAt: string; updatedAt?: string; running?: boolean };
 type Project = { id: string; name: string; cwd: string; sessions: Session[]; deleting?: boolean };
 type Item = { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[] };
 type Attachment = { data: string; name: string; size: number; image: boolean; transferId?: string };
@@ -24,12 +24,20 @@ function Logo({ small = false }: { small?: boolean }) {
   return <span className={'logo ' + (small ? 'small' : '')} aria-hidden="true">⌘</span>;
 }
 const compactLayout = '(max-width: 800px)';
+function SessionIndicator({ running, unread, size }: { running: boolean; unread: boolean; size: number }) {
+  if (running) return <LoaderCircle size={size} className="session-spinner" role="img" aria-label="正在执行"><title>正在执行</title></LoaderCircle>;
+  if (unread) return <span className="session-unread" role="img" aria-label="已结束，未查看" title="已结束，未查看"/>;
+  return <MessageSquare size={size} aria-hidden="true"/>;
+}
 function App() {
   const [user, setUser] = useState<User | null>(null), [boot, setBoot] = useState(true);
   const [allowRegistration, setAllowRegistration] = useState(false);
   const [mode, setMode] = useState('login'), [username, setUsername] = useState(''), [password, setPassword] = useState('');
   const [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]), [pid, setPid] = useState(''), [sid, setSid] = useState('');
+  const [turnActivity, setTurnActivity] = useState<Map<string, { running: boolean; version: number }>>(() => new Map());
+  const turnVersion = useRef(0);
+  const [unread, setUnread] = useState<{ userId: string; sessions: Set<string> } | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({}), [desktopSidebar, setDesktopSidebar] = useState(true), [filePanel, setFilePanel] = useState(false);
   const [isMobile, setIsMobile] = useState(() => window.matchMedia(compactLayout).matches);
   const [mobileSidebar, setMobileSidebar] = useState(false);
@@ -90,11 +98,30 @@ function App() {
   const projectsVersion = useRef(0);
   async function refreshProjects() {
     const version = ++projectsVersion.current;
+    const turnAt = turnVersion.current;
     const result = await api('/projects');
-    if (version === projectsVersion.current) setProjects(result.projects);
+    if (version === projectsVersion.current) {
+      setProjects(result.projects);
+      setTurnActivity(current => new Map([...current].filter(([, activity]) => activity.version > turnAt)));
+    }
     return result.projects as Project[];
   }
+  function markRead(sessionId: string) {
+    setUnread(current => {
+      if (!current?.sessions.has(sessionId)) return current;
+      const sessions = new Set(current.sessions);
+      sessions.delete(sessionId);
+      return { ...current, sessions };
+    });
+  }
+  function sessionIndicator(session: Session, size: number) {
+    return <SessionIndicator size={size}
+      running={Boolean(status.connected && socketConnected && (turnActivity.get(session.id)?.running ?? session.running))}
+      unread={Boolean(unread && unread.userId === user?.id && unread.sessions.has(session.id))}/>;
+  }
   function selectSession(projectId: string, sessionId: string) {
+    selection.current = { pid: projectId, sid: sessionId };
+    markRead(sessionId);
     setPid(projectId); setSid(sessionId); setSessionQuery(''); setRecentLimit(8);
     if (isMobile) setSidebar(false);
   }
@@ -134,7 +161,13 @@ function App() {
   }, []);
   useEffect(() => {
     if (!user) return;
+    const userId = user.id;
     const savedSelection = JSON.parse(localStorage.getItem('codex-selection-' + user.id) || '{}');
+    const unreadKey = 'codex-unread-' + user.id;
+    let savedUnread: string[] = [];
+    try { savedUnread = JSON.parse(localStorage.getItem(unreadKey) || '[]'); } catch {}
+    setUnread({ userId: user.id, sessions: new Set(Array.isArray(savedUnread) ? savedUnread : []) });
+    setTurnActivity(new Map());
     setProjects([]); setItems([]); setApprovals([]); setPid(''); setSid(''); setSessionQuery(''); setRecentLimit(8);
     refreshProjects().then(list => {
       const saved = savedSelection;
@@ -158,9 +191,19 @@ function App() {
         }
         if (data.type === 'projects-changed') { refreshProjects().catch(e => setError(e.message)); return; }
         if (data.type === 'status') { setStatus(data); if (data.connected) { refreshProjects().catch(e => setError(e.message)); if (selection.current.sid) loadHistory(); } return; }
-        if (data.type !== 'rpc' || data.sessionId !== selection.current.sid) return;
-        liveVersion.current++;
+        if (data.type !== 'rpc') return;
         const { method, params = {}, id } = data.payload;
+        if (method === 'turn/started' || method === 'turn/completed') {
+          const version = ++turnVersion.current;
+          const running = method === 'turn/started';
+          setTurnActivity(current => new Map(current).set(data.sessionId, { running, version }));
+          if (!running && (data.sessionId !== selection.current.sid || document.hidden)) {
+            setUnread(current => current?.userId === userId
+              ? { ...current, sessions: new Set(current.sessions).add(data.sessionId) } : current);
+          }
+        }
+        if (data.sessionId !== selection.current.sid) return;
+        liveVersion.current++;
         if (id !== undefined) setApprovals(current => [...current.filter(a => a.id !== id), data.payload]);
         if (method === 'serverRequest/resolved') setApprovals(current => current.filter(a => a.id !== params.requestId));
         if (method === 'turn/started') setRunning(true);
@@ -182,6 +225,18 @@ function App() {
     }
     connect(); return () => { disposed = true; clearTimeout(timer); socket?.close(); };
   }, [user?.id]);
+  useEffect(() => {
+    if (unread && unread.userId === user?.id) {
+      localStorage.setItem('codex-unread-' + unread.userId, JSON.stringify([...unread.sessions]));
+    }
+  }, [unread, user?.id]);
+  useEffect(() => {
+    if (!sid || unread?.userId !== user?.id) return;
+    const viewSession = () => { if (!document.hidden) markRead(sid); };
+    viewSession();
+    document.addEventListener('visibilitychange', viewSession);
+    return () => document.removeEventListener('visibilitychange', viewSession);
+  }, [sid, unread?.userId, user?.id]);
   useEffect(() => {
     historyVersion.current++; fileVersion.current++; imageVersion.current++; setImages([]); setItems([]); setCursor(null); setRunning(false); setApprovals([]); setFilePath('');
     if (user) localStorage.setItem('codex-selection-' + user.id, JSON.stringify({ pid, sid }));
@@ -299,10 +354,10 @@ function App() {
     {drawerOpen && <div className="mobile-backdrop" aria-hidden="true" onClick={closeDrawer}/>}
     {sidebar && <aside className="sidebar" aria-label="项目与会话" ref={isMobile ? drawer : undefined}><div className="sidebar-top"><div className="brand"><Logo small/><strong>AI 助手</strong></div><button className="icon-button" title="收起侧栏" aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose size={18}/></button></div><button className="new-project" onClick={() => openDialog({ type: 'project', title: '新建项目' })}><Plus size={18}/> 新建项目</button><label className="sidebar-search"><span>搜索项目或会话</span><input type="search" aria-label="搜索项目或会话" placeholder="搜索项目或会话…" value={sessionQuery} onChange={event => { setSessionQuery(event.target.value); setRecentLimit(8); }}/></label><nav className="project-tree" aria-label="会话导航">
       <div className="section-label">{query ? '搜索结果' : '最近会话'} <span>{recentSessions.length}</span></div>
-      <div className="recent-sessions">{recentSessions.slice(0, recentLimit).map(({ project: p, session: s }) => <button key={s.id} className={'recent-session '+(sid===s.id?'active':'')} onClick={() => selectSession(p.id,s.id)} title={s.name+' · '+p.cwd}><MessageSquare size={15}/><span><strong>{s.name}</strong><small>{p.name}</small></span></button>)}
+      <div className="recent-sessions">{recentSessions.slice(0, recentLimit).map(({ project: p, session: s }) => <button key={s.id} className={'recent-session '+(sid===s.id?'active':'')} onClick={() => selectSession(p.id,s.id)} title={s.name+' · '+p.cwd}>{sessionIndicator(s,15)}<span><strong>{s.name}</strong><small>{p.name}</small></span></button>)}
       {recentSessions.length===0 && <p className="sidebar-empty">{query ? (matchingProjects.length ? '匹配的项目下暂无会话' : '没有找到匹配的会话') : '新建会话后会显示在这里'}</p>}
       {recentSessions.length>recentLimit && <button className="load-more-sessions" onClick={() => setRecentLimit(value => value+20)}>查看更多会话 <ChevronDown size={13}/></button>}</div>
-      {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled title="请逐个归档会话，目录单独管理" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}><MessageSquare size={14}/><span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}</nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>共享工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
+      {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled title="请逐个归档会话，目录单独管理" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}>{sessionIndicator(s,14)}<span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}</nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>共享工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
     <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project||!canFiles} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     <div className="chat-scroll" ref={scroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}{items.map(item => <ChatItem key={item.id} item={item} projectId={pid}/>)}{running && <div className="working"><span className="pulse"/> AI 助手 正在工作<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method.endsWith('/requestApproval') ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}</div>}</div>
