@@ -33,6 +33,46 @@ test('paged projects fetch one upstream page and restore the selected session se
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
+test('project catalog pages ten distinct directories independently of session pagination', async () => {
+  const bus = new EventEmitter();
+  bus.state = { runId: 'test' };
+  bus.supports = () => false;
+  const thread = (i, suffix = '') => ({ id: i + suffix, cwd: '/workspace/项目-' + String(i).padStart(2, '0') });
+  const upstream = [];
+  bus.rpc = async (method, params) => {
+    assert.equal(method, 'thread/list');
+    if (params.cwd) {
+      assert.equal(params.cwd, thread(0).cwd);
+      return { data: [thread(0), thread(0, '-second'), thread(1)], nextCursor: null };
+    }
+    upstream.push(params.cursor);
+    return params.cursor
+      ? { data: [thread(0, '-second'), ...Array.from({ length: 10 }, (_, i) => thread(i + 13))], nextCursor: null }
+      : { data: Array.from({ length: 13 }, (_, i) => thread(i)), nextCursor: 'more-threads' };
+  };
+  const app = express();
+  app.use(sharedApi(bus, {}, () => {}).router);
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise(resolve => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}/projects?view=catalog`;
+    const first = await (await fetch(base)).json();
+    assert.deepEqual(upstream, [undefined]);
+    const nextUrl = base + '&cursor=' + encodeURIComponent(first.nextCursor);
+    const second = await (await fetch(nextUrl)).json();
+    assert.deepEqual(await (await fetch(nextUrl)).json(), second);
+    assert.deepEqual(upstream, [undefined, 'more-threads']);
+    const last = await (await fetch(base + '&cursor=' + encodeURIComponent(second.nextCursor))).json();
+    assert.deepEqual([first.projects.length, second.projects.length, last.projects.length], [10, 10, 3]);
+    assert.deepEqual(upstream, [undefined, 'more-threads']);
+    const sessionsUrl = new URL(`/projects/${first.projects[0].id}/sessions`, base);
+    const { sessions } = await (await fetch(sessionsUrl)).json();
+    assert.deepEqual(sessions.map(s => s.id), ['0', '0-second']);
+    assert.equal(new Set([...first.projects, ...second.projects, ...last.projects].map(p => p.id)).size, 23);
+    assert.equal(last.nextCursor, null);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('retrying an accepted message does not start or steer a second turn', async () => {
   const bus = new EventEmitter();
   bus.state = { runId: 'test', state: 'ready' };

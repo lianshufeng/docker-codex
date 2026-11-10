@@ -72,8 +72,10 @@ function App() {
   const [projectCursor, setProjectCursor] = useState<string | null>(null), [searchCursor, setSearchCursor] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<Project[]>([]);
   const [projectLoading, setProjectLoading] = useState(false), [searchLoading, setSearchLoading] = useState(false);
-  const [projectCatalogLoaded, setProjectCatalogLoaded] = useState(false);
-  const projectCatalog = useRef(false);
+  const [catalogIds, setCatalogIds] = useState<string[]>([]);
+  const [recentThreadIds, setRecentThreadIds] = useState<Set<string>>(() => new Set());
+  const [catalogCursor, setCatalogCursor] = useState<string | null>();
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const sidebar = isMobile ? mobileSidebar : desktopSidebar;
   const drawerOpen = isMobile && (sidebar || (filePanel && Boolean(pid)));
   const [status, setStatus] = useState<any>({ connected: false, state: 'connecting' });
@@ -140,28 +142,24 @@ function App() {
   }
   const projectsVersion = useRef(0);
   const projectRequest = useRef<AbortController | null>(null);
-  async function refreshProjects(selected = selection.current.sid, more?: string, merge = false, loadCatalog = false) {
+  async function refreshProjects(selected = selection.current.sid, more?: string, merge = false) {
     if (merge && projectRequest.current) return [];
     projectRequest.current?.abort();
     const request = new AbortController();
     projectRequest.current = request;
     const version = ++projectsVersion.current;
     const turnAt = turnVersion.current;
-    const full = loadCatalog || (!merge && projectCatalog.current);
-    const params = new URLSearchParams(full ? {} : { view: 'page', selected });
+    const params = new URLSearchParams({ view: 'page', selected });
     if (more) params.set('cursor', more);
     setProjectLoading(true);
     try {
-      const result = await api(full ? '/projects' : '/projects?' + params, { signal: request.signal });
+      const result = await api('/projects?' + params, { signal: request.signal });
       if (version === projectsVersion.current) {
-        setProjects(current => more || merge ? mergeProjects(current, result.projects) : result.projects);
+        setProjects(current => mergeProjects(current, result.projects));
         if (!merge || more) setProjectCursor(result.nextCursor ?? null);
-        if (full) {
-          projectCatalog.current = true;
-          setProjectCatalogLoaded(true);
-        }
+        const received = new Set<string>(result.projects.flatMap((p: Project) => p.sessions.map(s => s.id)));
+        setRecentThreadIds(current => new Set([...current, ...received]));
         setTurnActivity(current => {
-          const received = new Set<string>(result.projects.flatMap((p: Project) => p.sessions.map(s => s.id)));
           return new Map([...current].filter(([id, activity]) => !received.has(id) || activity.version > turnAt));
         });
       }
@@ -175,6 +173,30 @@ function App() {
         setProjectLoading(false);
       }
     }
+  }
+  const catalogRequest = useRef<AbortController | null>(null);
+  async function loadProjectCatalog(cursor?: string) {
+    catalogRequest.current?.abort();
+    const request = new AbortController();
+    catalogRequest.current = request;
+    const params = new URLSearchParams({ view: 'catalog' });
+    if (cursor) params.set('cursor', cursor);
+    setCatalogLoading(true);
+    try {
+      const result = await api('/projects?' + params, { signal: request.signal });
+      if (request.signal.aborted) return;
+      setProjects(current => mergeProjects(current, result.projects));
+      const ids = (result.projects as Project[]).map(p => p.id);
+      setCatalogIds(current => [...new Set([...current, ...ids])]);
+      setCatalogCursor(result.nextCursor ?? null);
+    } catch (e: any) {
+      if (request.signal.aborted) return;
+      if (cursor && e.status === 409) {
+        setCatalogIds([]); setCatalogCursor(undefined);
+        void loadProjectCatalog();
+      } else setError(e.message);
+    }
+    finally { if (!request.signal.aborted) setCatalogLoading(false); }
   }
   const searchRequest = useRef<AbortController | null>(null);
   async function searchProjects(query: string, more?: string) {
@@ -319,8 +341,7 @@ function App() {
     try { savedUnread = JSON.parse(localStorage.getItem(unreadKey) || '[]'); } catch {}
     setUnread({ userId: user.id, sessions: new Set(Array.isArray(savedUnread) ? savedUnread : []) });
     setTurnActivity(new Map());
-    projectCatalog.current = false;
-    setProjectCatalogLoaded(false);
+    setCatalogIds([]); setCatalogCursor(undefined); setRecentThreadIds(new Set());
     setProjects([]); setItems([]); setApprovals([]); setRetry(null); setPid(''); setSid(''); setSessionQuery(''); setRecentLimit(8);
     let disposed = false, socket: WebSocket, timer: ReturnType<typeof setTimeout>;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined, reconnects = 0, previousRun: string | undefined;
@@ -361,6 +382,7 @@ function App() {
       finally { initialListLoading = false; }
     }
     void loadInitialProjects();
+    void loadProjectCatalog();
     function connect() {
       socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/events?view=thread`);
       socketRef.current = socket;
@@ -395,6 +417,8 @@ function App() {
             if (!initialListLoaded && !initialListLoading) void loadInitialProjects();
             const changed = previousRun !== undefined && previousRun !== data.runId;
             if (changed) {
+              setProjects([]); setCatalogIds([]); setCatalogCursor(undefined); setRecentThreadIds(new Set());
+              void loadProjectCatalog();
               historyRequest.current?.abort(); historyRequest.current = null;
               hasHistory.current = false; historyCursor.current = null; setCursor(null);
               newerCursor.current = null;
@@ -489,7 +513,7 @@ function App() {
       window.removeEventListener('online', reconnectOnline);
       window.removeEventListener('offline', disconnectOffline);
       if (deltaFrame) cancelAnimationFrame(deltaFrame);
-      projectRequest.current?.abort(); historyRequest.current?.abort(); socket?.close(); socketRef.current = null;
+      projectRequest.current?.abort(); catalogRequest.current?.abort(); historyRequest.current?.abort(); socket?.close(); socketRef.current = null;
     };
   }, [user?.id]);
   useEffect(() => {
@@ -554,6 +578,7 @@ function App() {
       if (dialog.type === 'project') {
         if (!projectLocation) return;
         const { project: created } = await post('/projects', projectLocation);
+        setCatalogIds(current => [created.id, ...current.filter(id => id !== created.id)]);
         setProjects(current => {
           const existing = current.find(project => project.id === created.id);
           const sessions = [...created.sessions, ...(existing?.sessions ?? []).filter(session => !created.sessions.some((added: Session) => added.id === session.id))];
@@ -661,12 +686,25 @@ function App() {
   const canRenameThread = status.capabilities?.renameThread !== false;
   const canFiles = status.capabilities?.files !== false;
   const query = sessionQuery.trim().toLocaleLowerCase();
-  const matchingProjects = query ? mergeProjects(searchResults, projects.filter(project => project.name.toLocaleLowerCase().includes(query))) : projects;
+  const expandedProjectId = sidebar && !query && !collapsed[pid] && catalogIds.includes(pid) ? pid : '';
+  useEffect(() => {
+    if (!expandedProjectId) return;
+    const request = new AbortController();
+    api(`/projects/${expandedProjectId}/sessions`, { signal: request.signal }).then(({ sessions }) => {
+      if (request.signal.aborted) return;
+      setProjects(current => current.map(p => p.id === expandedProjectId
+        ? mergeProjects([p], [{ ...p, sessions }])[0] : p));
+    }).catch(e => { if (!request.signal.aborted) setError(e.message); });
+    return () => request.abort();
+  }, [expandedProjectId, user?.id]);
+  const projectsById = new Map(projects.map(p => [p.id, p]));
+  const matchingProjects = query ? mergeProjects(searchResults, projects.filter(project => project.name.toLocaleLowerCase().includes(query)))
+    : catalogIds.flatMap(id => projectsById.get(id) ?? []);
   const recentSessions = useMemo(() => (query ? mergeProjects(searchResults, projects.flatMap(project => {
     const sessions = project.sessions.filter(session => (project.name + ' ' + session.name).toLocaleLowerCase().includes(query));
     return sessions.length ? [{ ...project, sessions }] : [];
-  })) : projects).flatMap(project => project.sessions.map(session => ({ project, session })))
-    .sort((a, b) => sessionActivity(b.session) - sessionActivity(a.session) || a.session.id.localeCompare(b.session.id)), [projects, query, searchResults]);
+  })) : projects).flatMap(project => project.sessions.filter(session => query || recentThreadIds.has(session.id)).map(session => ({ project, session })))
+    .sort((a, b) => sessionActivity(b.session) - sessionActivity(a.session) || a.session.id.localeCompare(b.session.id)), [projects, query, recentThreadIds, searchResults]);
   function selectResult(p: Project, s: Session) {
     setProjects(current => mergeProjects(current, [{ ...p, sessions: [s] }]));
     selectSession(p.id, s.id);
@@ -693,8 +731,7 @@ function App() {
       {(recentSessions.length>recentLimit || sessionCursor) && <button className="load-more-sessions" disabled={pageLoading} onClick={moreSessions}>查看更多会话 <ChevronDown size={13}/></button>}</div>
       {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled title="请逐个归档会话，目录单独管理" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}>{sessionIndicator(s,14)}<span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}
       {query ? searchCursor && <button className="load-more-sessions" disabled={searchLoading} onClick={loadNextSessionPage}>加载更多搜索结果 <ChevronDown size={13}/></button>
-        : projectCatalogLoaded ? <p className="sidebar-empty">已显示执行端提供的全部项目</p>
-          : <button className="load-more-sessions" disabled={projectLoading} onClick={() => void refreshProjects(undefined, undefined, false, true).catch(e => setError(e.message))}>{projectLoading ? '正在加载…' : '加载更多项目'} <ChevronDown size={13}/></button>}
+        : catalogCursor !== null && <button className="load-more-sessions" disabled={catalogLoading} onClick={() => void loadProjectCatalog(catalogCursor)}>{catalogLoading ? '正在加载…' : '加载更多项目'} <ChevronDown size={13}/></button>}
       </nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>共享工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
     <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project||!canFiles} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}

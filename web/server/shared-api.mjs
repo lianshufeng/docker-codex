@@ -9,6 +9,7 @@ import { Locks, HttpError, requireValue, displayName } from './storage.mjs';
 import { decodeImages, decodeFiles } from './images.mjs';
 import { absolute, projectId, projectOf, sessionOf, listThreadPage, listThreads, checkedPath, imagePath, projectOptions, linuxProjectPath } from './app-workspace.mjs';
 import { historyPage } from './history-page.mjs';
+import { projectCatalog } from './project-catalog.mjs';
 
 export function sharedApi(bus, config, broadcast) {
   const router = express.Router(), locks = new Locks(), admissions = new Locks();
@@ -26,6 +27,8 @@ export function sharedApi(bus, config, broadcast) {
   } });
   router.use((req, res, next) => context.run({ runId: bus.state.runId }, next));
   const reservations = new Map(), approvals = new Map(), submitted = new Map();
+  const listedSession = t => ({ ...sessionOf(t), running: t.status?.type === 'active' || reservations.has(t.id) });
+  const catalogPage = projectCatalog(bus, listedSession);
   const capabilities = () => ({ steer: bus.supports('turn/steer'), plan: bus.supports('config/read') && bus.supports('turn/start'),
     renameThread: bus.supports('thread/name/set'), archiveThread: bus.supports('thread/archive'),
     files: bus.supports('fs/readDirectory') && bus.supports('fs/readFile'), shared: true,
@@ -126,6 +129,7 @@ export function sharedApi(bus, config, broadcast) {
     const selected = typeof req.query.selected === 'string' ? req.query.selected : '';
     const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 200) : '';
     const pageCursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+    if (req.query.view === 'catalog') return res.json(await catalogPage(pageCursor, req.user?.id));
     const page = paged ? await listThreadPage(bus, { limit: 30, sortKey: 'updated_at',
       cursor: pageCursor, ...(query ? { searchTerm: query } : {}) }) : null;
     const threads = page ? page.data.slice(0, 30) : await listThreads(bus);
@@ -159,10 +163,17 @@ export function sharedApi(bus, config, broadcast) {
       if (!t.cwd) continue;
       const p = projectOf(t.cwd);
       if (!groups.has(p.id)) groups.set(p.id, p);
-      groups.get(p.id).sessions.push({ ...sessionOf(t), running: t.status?.type === 'active' || reservations.has(t.id) });
+      groups.get(p.id).sessions.push(listedSession(t));
     }
-    for (const p of groups.values()) p.sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    res.json({ projects: [...groups.values()], nextCursor: page?.nextCursor ?? null });
+    const projects = [...groups.values()];
+    for (const p of projects) p.sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    res.json({ projects, nextCursor: page?.nextCursor ?? null });
+  });
+  router.get('/projects/:pid/sessions', async (req, res) => {
+    const cwd = root(req);
+    const threads = await listThreads(bus, { cwd, sortKey: 'updated_at' });
+    const sessions = threads.filter(t => t.cwd && projectId(t.cwd) === req.params.pid).map(listedSession);
+    res.json({ sessions });
   });
   async function create(cwd, name) {
     const requestedName = name ? displayName(name) : undefined;
