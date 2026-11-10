@@ -58,7 +58,11 @@ export class DesktopBus extends EventEmitter {
             const detail = typeof message.error === 'string' ? message.error : message.error.message || '桌面请求失败';
             if (detail === '已达到本次服务运行的命令数量上限') {
               request.reject(new HttpError(503, '当前仍连接旧版桌面桥，累计请求已达上限。请切换到新版桌面连接服务。'));
-            } else request.reject(new HttpError(message.stage === 'delivery_unknown' ? 503 : 502, detail));
+            } else {
+              const error = new HttpError(message.stage === 'delivery_unknown' ? 503 : 502, detail);
+              if (typeof message.error === 'object') error.rpcCode = message.error.code;
+              request.reject(error);
+            }
           }
           else request.resolve(message.result);
           return;

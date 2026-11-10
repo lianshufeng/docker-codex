@@ -1,23 +1,37 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ReplyMarkdown, ReturnedImage } from './reply-images';
+import { ReplyImage } from './message-image';
 import { ProjectLocation, ProjectLocationValue } from './project-location';
 import { ElicitationForm } from './elicitation-form';
 import { uploadFile } from './upload';
 import { Plus, Folder, FolderOpen, MessageSquare, LoaderCircle, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Archive, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, File, FileText } from 'lucide-react';
 import './style.css';
 import './images.css';
+import './chat-scroll.css';
 
 type User = { id: string; username: string };
 type Session = { id: string; threadId: string; name: string; createdAt: string; updatedAt?: string; running?: boolean };
 type Project = { id: string; name: string; cwd: string; sessions: Session[]; deleting?: boolean };
-type Item = { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[] };
+type Item = { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[]; turnId?: string; outputDeferred?: boolean };
 type Attachment = { data: string; name: string; size: number; image: boolean; transferId?: string };
 type Dialog = { type: string; title: string; value?: string; project?: Project; session?: Session; file?: any; relative?: string };
 async function api(url: string, options: RequestInit = {}) {
-  const response = await fetch('/api' + url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } });
+  const request = { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } };
+  const read = !options.method || options.method === 'GET';
+  let response: Response | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      response = await fetch('/api' + url, request);
+      if (!read || ![502, 503, 504].includes(response.status) || attempt === 1) break;
+      await response.body?.cancel();
+    } catch (error) {
+      if (!read || options.signal?.aborted || attempt === 1) throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 450));
+    options.signal?.throwIfAborted();
+  }
   const result = await response.json().catch(() => ({ error: '服务器响应无效' }));
-  if (!response.ok) throw new Error(result.error || '请求失败');
+  if (!response.ok) throw Object.assign(new Error(result.error || '请求失败'), { status: response.status });
   return result;
 }
 const post = (url: string, body: any = {}) => api(url, { method: 'POST', body: JSON.stringify(body) });
@@ -25,6 +39,17 @@ function Logo({ small = false }: { small?: boolean }) {
   return <span className={'logo ' + (small ? 'small' : '')} aria-hidden="true">⌘</span>;
 }
 const compactLayout = '(max-width: 800px)';
+const ReplyMarkdown = lazy(() => import('./reply-images').then(module => ({ default: module.ReplyMarkdown })));
+const ReturnedImage = lazy(() => import('./reply-images').then(module => ({ default: module.ReturnedImage })));
+function mergeProjects(current: Project[], incoming: Project[]) {
+  const projects = new Map(current.map(p => [p.id, p]));
+  for (const project of incoming) {
+    const sessions = new Map(projects.get(project.id)?.sessions.map(s => [s.id, s]));
+    for (const session of project.sessions) sessions.set(session.id, session);
+    projects.set(project.id, { ...project, sessions: [...sessions.values()] });
+  }
+  return [...projects.values()];
+}
 function SessionIndicator({ running, unread, size }: { running: boolean; unread: boolean; size: number }) {
   if (running) return <LoaderCircle size={size} className="session-spinner" role="img" aria-label="正在执行"><title>正在执行</title></LoaderCircle>;
   if (unread) return <span className="session-unread" role="img" aria-label="已结束，未查看" title="已结束，未查看"/>;
@@ -44,15 +69,21 @@ function App() {
   const [isMobile, setIsMobile] = useState(() => window.matchMedia(compactLayout).matches);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [sessionQuery, setSessionQuery] = useState(''), [recentLimit, setRecentLimit] = useState(8);
+  const [projectCursor, setProjectCursor] = useState<string | null>(null), [searchCursor, setSearchCursor] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState<Project[]>([]);
+  const [projectLoading, setProjectLoading] = useState(false);
   const sidebar = isMobile ? mobileSidebar : desktopSidebar;
   const drawerOpen = isMobile && (sidebar || (filePanel && Boolean(pid)));
   const [status, setStatus] = useState<any>({ connected: false, state: 'connecting' });
   const [items, setItems] = useState<Item[]>([]), [running, setRunning] = useState(false), [loadingHistory, setLoadingHistory] = useState(false), [cursor, setCursor] = useState<string | null>(null);
-  const [approvals, setApprovals] = useState<any[]>([]), [message, setMessage] = useState(''), [filePath, setFilePath] = useState(''), [files, setFiles] = useState<any[]>([]);
+  const [approvals, setApprovals] = useState<any[]>([]), [filePath, setFilePath] = useState(''), [files, setFiles] = useState<any[]>([]);
+  const drafts = useRef(new Map<string, string>());
+  const pendingSend = useRef(new Map<string, { fingerprint: string; requestId: string }>());
   const [dialog, setDialog] = useState<Dialog | null>(null), [dialogValue, setDialogValue] = useState(''), [oldPassword, setOldPassword] = useState('');
   const [projectLocation, setProjectLocation] = useState<ProjectLocationValue | null>(null);
   const [menu, setMenu] = useState(false), [socketConnected, setSocketConnected] = useState(false);
   const [images, setImages] = useState<Attachment[]>([]);
+  const [planMode, setPlanMode] = useState<boolean | undefined>(undefined);
   const fileInput = useRef<HTMLInputElement>(null);
   const drawer = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -75,6 +106,14 @@ function App() {
   const imageVersion = useRef(0);
   const selection = useRef({ pid, sid }); selection.current = { pid, sid };
   const historyVersion = useRef(0), liveVersion = useRef(0), fileVersion = useRef(0), scroll = useRef<HTMLDivElement>(null);
+  const historyRequest = useRef<AbortController | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const followLatest = useRef(true), prependOffset = useRef<number | null>(null);
+  const [awayFromBottom, setAwayFromBottom] = useState(false), [newMessages, setNewMessages] = useState(false);
+  const historyCursor = useRef<string | null>(null);
+  const newerCursor = useRef<string | null>(null);
+  const hasHistory = useRef(false);
+  const approvalVersion = useRef(0);
   const project = projects.find(p => p.id === pid), session = project?.sessions.find(s => s.id === sid);
   const sessionUrl = (p = pid, s = sid) => `/projects/${p}/sessions/${s}`;
   useEffect(() => {
@@ -98,16 +137,56 @@ function App() {
     setFilePanel(!filePanel);
   }
   const projectsVersion = useRef(0);
-  async function refreshProjects() {
+  const projectRequest = useRef<AbortController | null>(null);
+  async function refreshProjects(selected = selection.current.sid, more?: string, merge = false) {
+    projectRequest.current?.abort();
+    const request = new AbortController();
+    projectRequest.current = request;
     const version = ++projectsVersion.current;
     const turnAt = turnVersion.current;
-    const result = await api('/projects');
-    if (version === projectsVersion.current) {
-      setProjects(result.projects);
-      setTurnActivity(current => new Map([...current].filter(([, activity]) => activity.version > turnAt)));
+    const params = new URLSearchParams({ view: 'page', selected });
+    if (more) params.set('cursor', more);
+    setProjectLoading(true);
+    try {
+      const result = await api('/projects?' + params, { signal: request.signal });
+      if (version === projectsVersion.current) {
+        setProjects(current => more || merge ? mergeProjects(current, result.projects) : result.projects);
+        if (!merge || more) setProjectCursor(result.nextCursor);
+        setTurnActivity(current => {
+          const received = new Set<string>(result.projects.flatMap((p: Project) => p.sessions.map(s => s.id)));
+          return new Map([...current].filter(([id, activity]) => !received.has(id) || activity.version > turnAt));
+        });
+      }
+      return result.projects as Project[];
+    } catch (error) {
+      if (!request.signal.aborted) throw error;
+      return [];
+    } finally {
+      if (version === projectsVersion.current) setProjectLoading(false);
     }
-    return result.projects as Project[];
   }
+  const searchRequest = useRef<AbortController | null>(null);
+  async function searchProjects(query: string, more?: string) {
+    searchRequest.current?.abort();
+    const request = new AbortController();
+    searchRequest.current = request;
+    const params = new URLSearchParams({ view: 'page', q: query });
+    if (more) params.set('cursor', more);
+    try {
+      const result = await api('/projects?' + params, { signal: request.signal });
+      if (!request.signal.aborted) {
+        setSearchResults(current => more ? mergeProjects(current, result.projects) : result.projects);
+        setSearchCursor(result.nextCursor);
+      }
+    } catch (e: any) { if (!request.signal.aborted) setError(e.message); }
+  }
+  useEffect(() => {
+    const query = sessionQuery.trim();
+    setSearchResults([]); setSearchCursor(null);
+    if (!query || !user) return;
+    const timer = setTimeout(() => void searchProjects(query), 300);
+    return () => { clearTimeout(timer); searchRequest.current?.abort(); };
+  }, [sessionQuery, user?.id]);
   function markRead(sessionId: string) {
     setUnread(current => {
       if (!current?.sessions.has(sessionId)) return current;
@@ -128,31 +207,82 @@ function App() {
     if (isMobile) setSidebar(false);
   }
   function sessionActivity(session: Session) { return Date.parse(session.updatedAt || session.createdAt) || 0; }
-  async function loadHistory(older = false) {
+  async function loadHistory(older = false, catchUp = false) {
     const selected = selection.current; if (!selected.sid) return;
+    if (older && !historyCursor.current) return;
+    if (historyRequest.current && !older) return;
+    historyRequest.current?.abort();
+    const request = new AbortController();
+    historyRequest.current = request;
     const version = ++historyVersion.current, liveAt = liveVersion.current;
+    const approvalsAt = approvalVersion.current;
+    const incremental = !older && catchUp && newerCursor.current;
+    let refreshLatest = false;
     setLoadingHistory(true);
     try {
-      const result = await api(sessionUrl(selected.pid, selected.sid) + '/history' + (older && cursor ? '?cursor=' + encodeURIComponent(cursor) : ''));
+      const query = new URLSearchParams({ view: 'items' });
+      if (older && historyCursor.current) query.set('cursor', historyCursor.current);
+      if (incremental) query.set('cursor', incremental);
+      const url = sessionUrl(selected.pid, selected.sid) + '/history?';
+      let result;
+      let incoming: Item[] = [];
+      if (incremental) {
+        const visited = new Set<string>();
+        do {
+          const token = query.get('cursor')!;
+          if (visited.has(token)) throw new Error('执行端重复返回同一个历史游标');
+          visited.add(token);
+          result = await api(url + query, { signal: request.signal });
+          incoming.push(...result.items);
+          if (result.nextCursor) query.set('cursor', result.nextCursor);
+        } while (result.nextCursor);
+      } else {
+        result = await api(url + query, { signal: request.signal });
+        incoming = [...result.items].reverse();
+      }
       if (version !== historyVersion.current || selected.sid !== selection.current.sid) return;
-      const turns = [...result.turns].reverse();
-      const incoming = turns.flatMap((turn: any) => turn.items || []);
+      if (older && scroll.current && !followLatest.current) prependOffset.current = scroll.current.scrollHeight - scroll.current.scrollTop;
       setItems(current => {
-        if (older) return [...incoming, ...current.filter(i => !incoming.some((v: Item) => v.id === i.id))];
-        if (liveVersion.current !== liveAt) {
-          const merged = [...incoming];
-          for (const item of current) { const index = merged.findIndex(i => i.id === item.id); if (index >= 0) merged[index] = item; else merged.push(item); }
-          return merged;
+        const incomingIds = new Set(incoming.map(item => item.id));
+        const currentById = new Map(current.map(item => [item.id, item]));
+        if (older) return [...incoming.filter(item => !currentById.has(item.id)), ...current];
+        if (incremental) {
+          const merged = new Map(currentById);
+          for (const item of incoming) if (liveVersion.current === liveAt || !merged.has(item.id)) merged.set(item.id, item);
+          return [...merged.values()];
         }
-        return incoming;
+        const page = liveVersion.current !== liveAt ? incoming.map(item => currentById.get(item.id) ?? item) : incoming;
+        const first = current.findIndex(item => incomingIds.has(item.id));
+        if (first >= 0) {
+          const prefix = current.slice(0, first);
+          const tail = liveVersion.current !== liveAt ? current.slice(first).filter(item => !incomingIds.has(item.id)) : [];
+          return [...prefix, ...page, ...tail];
+        }
+        return liveVersion.current !== liveAt ? [...page, ...current] : page;
       });
-      setCursor(result.nextCursor || null); setRunning(Boolean(result.active)); setApprovals(result.approvals || []);
+      if (older || !hasHistory.current) {
+        historyCursor.current = result.nextCursor || null;
+        setCursor(historyCursor.current);
+      }
+      if (!older && result.newerCursor) newerCursor.current = result.newerCursor;
+      hasHistory.current = true;
+      if (liveVersion.current === liveAt) setRunning(Boolean(result.active));
+      if (approvalVersion.current === approvalsAt) setApprovals(result.approvals || []);
       if (!older && !result.active && liveVersion.current === liveAt) {
         setRetry(current => current?.sessionId === selected.sid ? null : current);
       }
     } catch (e: any) {
-      if (version === historyVersion.current && selected.sid === selection.current.sid) setError(e.message);
-    } finally { if (version === historyVersion.current) setLoadingHistory(false); }
+      if (!request.signal.aborted && version === historyVersion.current && selected.sid === selection.current.sid) {
+        if (incremental && [400, 409, 502].includes(e.status)) {
+          newerCursor.current = null;
+          refreshLatest = true;
+        } else setError(e.message);
+      }
+    } finally {
+      if (historyRequest.current === request) historyRequest.current = null;
+      if (version === historyVersion.current) setLoadingHistory(false);
+      if (refreshLatest) void loadHistory();
+    }
   }
   async function refreshFiles() {
     if (!pid) return; const version = ++fileVersion.current;
@@ -166,24 +296,63 @@ function App() {
   }, []);
   useEffect(() => {
     if (!user) return;
+    drafts.current.clear();
+    pendingSend.current.clear();
     const userId = user.id;
-    const savedSelection = JSON.parse(localStorage.getItem('codex-selection-' + user.id) || '{}');
+    let savedSelection: { pid?: string; sid?: string } = {};
+    try { savedSelection = JSON.parse(localStorage.getItem('codex-selection-' + user.id) || '{}') ?? {}; } catch {}
     const unreadKey = 'codex-unread-' + user.id;
     let savedUnread: string[] = [];
     try { savedUnread = JSON.parse(localStorage.getItem(unreadKey) || '[]'); } catch {}
     setUnread({ userId: user.id, sessions: new Set(Array.isArray(savedUnread) ? savedUnread : []) });
     setTurnActivity(new Map());
     setProjects([]); setItems([]); setApprovals([]); setRetry(null); setPid(''); setSid(''); setSessionQuery(''); setRecentLimit(8);
-    refreshProjects().then(list => {
-      const saved = savedSelection;
-      const p = list.find(v => v.id === saved.pid) || list[0];
-      if (p) { setPid(p.id); setSid(p.sessions.find(s => s.id === saved.sid)?.id || p.sessions[0]?.id || ''); }
-    }).catch(e => setError(e.message));
     let disposed = false, socket: WebSocket, timer: ReturnType<typeof setTimeout>;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined, reconnects = 0, previousRun: string | undefined;
+    let deltaFrame = 0;
+    const deltas = new Map<string, { turnId: string; text: string }>();
+    function flushDeltas() {
+      if (deltaFrame) cancelAnimationFrame(deltaFrame);
+      deltaFrame = 0;
+      if (!deltas.size) return;
+      const updates = new Map(deltas); deltas.clear();
+      setItems(current => {
+        const ids = new Set(current.map(item => item.id));
+        const next = current.map(item => {
+          const delta = updates.get(item.id);
+          if (!delta) return item;
+          return { ...item, text: (item.text || '') + delta.text };
+        });
+        for (const [id, delta] of updates) if (!ids.has(id)) next.push({ id, type: 'agentMessage', ...delta });
+        return next;
+      });
+    }
+    function scheduleProjects() {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => void refreshProjects(selection.current.sid, undefined, true).catch(e => setError(e.message)), 350);
+    }
+    let initialListLoaded = false, initialListLoading = false;
+    async function loadInitialProjects() {
+      if (initialListLoaded || initialListLoading) return;
+      initialListLoading = true;
+      try {
+        const list = await refreshProjects(typeof savedSelection.sid === 'string' ? savedSelection.sid : '');
+        if (disposed) return;
+        initialListLoaded = true;
+        const saved = savedSelection;
+        const p = list.find(v => v.id === saved.pid) || list[0];
+        if (p) { setPid(p.id); setSid(p.sessions.find(s => s.id === saved.sid)?.id || p.sessions[0]?.id || ''); }
+      } catch (e: any) { if (!disposed) setError(e.message); }
+      finally { initialListLoading = false; }
+    }
+    void loadInitialProjects();
     function connect() {
-      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/events`);
-      socket.onopen = () => { setSocketConnected(true); if (selection.current.sid) loadHistory(); };
+      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/events?view=thread`);
+      socketRef.current = socket;
+      let subscribedRun: string | undefined;
+      socket.onopen = () => { reconnects = 0; setSocketConnected(true); };
       socket.onmessage = event => {
+        if (disposed) return;
         let data: any; try { data = JSON.parse(event.data); } catch { return; }
         if (data.type === 'auth-expired') { setUser(null); setItems([]); return; }
         if (data.type === 'session-activity') {
@@ -194,20 +363,57 @@ function App() {
           } : project));
           return;
         }
-        if (data.type === 'projects-changed') { refreshProjects().catch(e => setError(e.message)); return; }
-        if (data.type === 'status') { setStatus(data); if (data.connected) { refreshProjects().catch(e => setError(e.message)); if (selection.current.sid) loadHistory(); } return; }
-        if (data.type !== 'rpc') return;
-        const { method, params = {}, id } = data.payload;
-        if (method === 'turn/started' || method === 'turn/completed') {
+        if (data.type === 'projects-changed') {
+          if (data.project) {
+            setProjects(current => mergeProjects(current, [data.project]));
+            return;
+          }
+          if (data.removed) setProjects(current => current.flatMap(p => {
+            const sessions = p.sessions.filter(s => s.id !== data.removed);
+            return sessions.length ? [{ ...p, sessions }] : [];
+          }));
+          scheduleProjects(); return;
+        }
+        if (data.type === 'status') {
+          setStatus(data);
+          if (data.connected) {
+            if (!initialListLoaded && !initialListLoading) void loadInitialProjects();
+            const changed = previousRun !== undefined && previousRun !== data.runId;
+            if (changed) {
+              historyRequest.current?.abort(); historyRequest.current = null;
+              hasHistory.current = false; historyCursor.current = null; setCursor(null);
+              newerCursor.current = null;
+              void refreshProjects().catch(e => setError(e.message));
+            }
+            previousRun = data.runId;
+            if (subscribedRun !== data.runId) {
+              subscribedRun = data.runId;
+              socket.send(JSON.stringify({ type: 'subscribe', threadId: selection.current.sid }));
+            }
+          } else subscribedRun = undefined;
+          return;
+        }
+        if (data.type === 'subscribed') {
+          if (data.threadId && data.threadId === selection.current.sid) void loadHistory(false, true);
+          return;
+        }
+        if (data.type !== 'rpc' && data.type !== 'turn-activity') return;
+        const { method, params = {}, id } = data.payload ?? {};
+        if (data.type === 'turn-activity' || method === 'turn/started' || method === 'turn/completed') {
           const version = ++turnVersion.current;
-          const running = method === 'turn/started';
+          const running = data.type === 'turn-activity' ? data.running : method === 'turn/started';
           setTurnActivity(current => new Map(current).set(data.sessionId, { running, version }));
+          if (!running) {
+            const updatedAt = new Date().toISOString();
+            setProjects(current => current.map(p => p.sessions.some(s => s.id === data.sessionId)
+              ? { ...p, sessions: p.sessions.map(s => s.id === data.sessionId ? { ...s, updatedAt } : s) } : p));
+          }
           if (!running && (data.sessionId !== selection.current.sid || document.hidden)) {
             setUnread(current => current?.userId === userId
               ? { ...current, sessions: new Set(current.sessions).add(data.sessionId) } : current);
           }
         }
-        if (data.sessionId !== selection.current.sid) return;
+        if (data.type !== 'rpc' || data.sessionId !== selection.current.sid) return;
         liveVersion.current++;
         if (method === 'error' && params.willRetry === true) {
           const attempt = /^Reconnecting\.{3}\s*(\d+\/\d+)$/.exec(params.error?.message ?? params.message ?? '')?.[1];
@@ -218,32 +424,58 @@ function App() {
           const turnId = params.turnId ?? params.turn?.id;
           setRetry(current => current && current.sessionId === data.sessionId && current.turnId === turnId ? null : current);
         }
-        if (id !== undefined) setApprovals(current => [...current.filter(a => a.id !== id), data.payload]);
-        if (method === 'serverRequest/resolved') setApprovals(current => current.filter(a => a.id !== params.requestId));
+        if (id !== undefined || method === 'serverRequest/resolved' || method === 'turn/completed') approvalVersion.current++;
+        if (id !== undefined) setApprovals(current => [...current.filter(a => String(a.id) !== String(id)), data.payload]);
+        if (method === 'serverRequest/resolved') setApprovals(current => current.filter(a => String(a.id) !== String(params.requestId)));
         if (method === 'turn/started') setRunning(true);
         if (method === 'turn/completed') {
+          flushDeltas();
           setRunning(false);
           setApprovals(current => current.filter(request =>
             request.method === 'mcpServer/elicitation/request' && request.params.turnId !== params.turn.id));
           if (params.turn.error) setError(params.turn.error.message);
-          loadHistory();
+          if (!hasHistory.current) void loadHistory();
         }
         if (method === 'error' && params.willRetry !== true) setError(params.error?.message || params.message || '任务发生错误');
         if ((method === 'item/started' || method === 'item/completed') && params.item) {
-          setItems(current => { const index = current.findIndex(i => i.id === params.item.id); if (index < 0) return [...current, params.item]; return current.map((i, n) => n === index ? params.item : i); });
+          flushDeltas();
+          const item = { ...params.item, turnId: params.turnId };
+          setItems(current => { const index = current.findIndex(i => i.id === item.id); if (index < 0) return [...current, item]; return current.map((i, n) => n === index ? item : i); });
         }
         if (method === 'item/agentMessage/delta') {
-          setItems(current => {
-            if (!current.some(i => i.id === params.itemId)) return [...current, { id: params.itemId, type: 'agentMessage', text: params.delta }];
-            return current.map(i => i.id === params.itemId ? { ...i, text: (i.text || '') + params.delta } : i);
-          });
+          deltas.set(params.itemId, { turnId: params.turnId, text: (deltas.get(params.itemId)?.text || '') + params.delta });
+          if (!deltaFrame) {
+            const selected = selection.current.sid;
+            deltaFrame = requestAnimationFrame(() => {
+              if (selection.current.sid === selected) flushDeltas();
+              else { deltaFrame = 0; deltas.clear(); }
+            });
+          }
         }
         if (method === 'item/commandExecution/outputDelta') setItems(current => current.map(i => i.id === params.itemId ? { ...i, aggregatedOutput: ((i.aggregatedOutput || '') + params.delta) } : i));
       };
-      socket.onclose = event => { setSocketConnected(false); if (event.code === 1008) { setUser(null); setItems([]); return; } if (!disposed) timer = setTimeout(connect, 2000); };
+      socket.onclose = event => {
+        if (disposed) return;
+        setSocketConnected(false);
+        if (event.code === 1008) { setUser(null); setItems([]); return; }
+        timer = setTimeout(connect, Math.min(1000 * 2 ** reconnects++, 15000));
+      };
       socket.onerror = () => socket.close();
     }
-    connect(); return () => { disposed = true; clearTimeout(timer); socket?.close(); };
+    function reconnectOnline() {
+      clearTimeout(timer);
+      if (socket?.readyState === WebSocket.CLOSED) connect();
+    }
+    function disconnectOffline() { socket?.close(); }
+    window.addEventListener('online', reconnectOnline);
+    window.addEventListener('offline', disconnectOffline);
+    connect(); return () => {
+      disposed = true; clearTimeout(timer); clearTimeout(refreshTimer);
+      window.removeEventListener('online', reconnectOnline);
+      window.removeEventListener('offline', disconnectOffline);
+      if (deltaFrame) cancelAnimationFrame(deltaFrame);
+      projectRequest.current?.abort(); historyRequest.current?.abort(); socket?.close(); socketRef.current = null;
+    };
   }, [user?.id]);
   useEffect(() => {
     if (unread && unread.userId === user?.id) {
@@ -258,13 +490,40 @@ function App() {
     return () => document.removeEventListener('visibilitychange', viewSession);
   }, [sid, unread?.userId, user?.id]);
   useEffect(() => {
+    historyRequest.current?.abort(); historyRequest.current = null;
+    hasHistory.current = false; historyCursor.current = null;
+    newerCursor.current = null;
+    setPlanMode(undefined);
+    followLatest.current = true; prependOffset.current = null;
+    setAwayFromBottom(false); setNewMessages(false);
     historyVersion.current++; fileVersion.current++; imageVersion.current++; setImages([]); setItems([]); setCursor(null); setRunning(false); setApprovals([]); setRetry(null); setFilePath('');
     if (user) localStorage.setItem('codex-selection-' + user.id, JSON.stringify({ pid, sid }));
-    if (sid) loadHistory();
+    if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify({ type: 'subscribe', threadId: sid }));
+    if (sid) void loadHistory();
     else setLoadingHistory(false);
   }, [pid, sid]);
   useEffect(() => { if (filePanel && pid) refreshFiles(); }, [filePanel, pid, filePath, running]);
-  useEffect(() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [items.length, items.at(-1)?.text, running]);
+  function onChatScroll() {
+    const viewport = scroll.current;
+    if (!viewport) return;
+    followLatest.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 72;
+    setAwayFromBottom(!followLatest.current);
+    if (followLatest.current) setNewMessages(false);
+  }
+  function jumpToLatest() {
+    followLatest.current = true; setAwayFromBottom(false); setNewMessages(false);
+    const viewport = scroll.current;
+    if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
+  }
+  useLayoutEffect(() => {
+    const viewport = scroll.current;
+    if (!viewport) return;
+    if (prependOffset.current !== null) {
+      viewport.scrollTo({ top: viewport.scrollHeight - prependOffset.current, behavior: 'instant' });
+      prependOffset.current = null;
+    } else if (followLatest.current) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
+    else if (items.length || approvals.length) setNewMessages(true);
+  }, [items.length, items.at(-1)?.text, approvals.length, running, cursor]);
   async function authenticate(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError('');
     try {
@@ -350,12 +609,35 @@ function App() {
     event.preventDefault();
     await addFiles(files);
   }
-  async function send(event: React.FormEvent, steer = false) {
+  async function send(event: React.FormEvent, message: string, clearMessage: () => void, steer = false) {
     event.preventDefault(); if ((!message.trim() && !images.length) || !session || busy || reading.current) return; setBusy(true); setError('');
     const selected = selection.current.sid;
     imageVersion.current++;
-    try { await post(sessionUrl() + '/messages', { text: message, files: images.filter(file => !file.transferId), attachments: images.filter(file => file.transferId).map(file => file.transferId), steer }); if (selection.current.sid === selected) { setMessage(''); setImages([]); setRunning(true); if (filePanel) await refreshFiles(); } }
-    catch (e: any) { setError(e.message); } finally { setBusy(false); }
+    const liveAt = liveVersion.current;
+    const payload = { text: message, files: images.filter(file => !file.transferId),
+      attachments: images.filter(file => file.transferId).map(file => file.transferId), steer, plan: planMode };
+    const fingerprint = JSON.stringify([message, payload.attachments, images.map(file => [file.name, file.size, file.data.length]), planMode]);
+    const previous = pendingSend.current.get(selected);
+    const requestId = previous?.fingerprint === fingerprint ? previous.requestId
+      : Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+    pendingSend.current.set(selected, { fingerprint, requestId });
+    try {
+      const result = await post(sessionUrl() + '/messages', { ...payload, requestId });
+      pendingSend.current.delete(selected);
+      drafts.current.delete(selected);
+      if (selection.current.sid === selected) {
+        clearMessage(); setImages([]);
+        if (result.duplicate) void loadHistory(false, true);
+        else if (liveVersion.current === liveAt) setRunning(true);
+        if (filePanel) await refreshFiles();
+      }
+    }
+    catch (e: any) {
+      if (e instanceof TypeError) {
+        setError('发送结果待确认，草稿已保留。连接恢复后请查看会话。');
+        void loadHistory(false, true);
+      } else setError(e.message);
+    } finally { setBusy(false); }
   }
   async function stop() { try { await post(sessionUrl() + '/stop'); } catch (e: any) { setError(e.message); } }
   const connected = status.connected && socketConnected;
@@ -364,36 +646,60 @@ function App() {
   const canRenameThread = status.capabilities?.renameThread !== false;
   const canFiles = status.capabilities?.files !== false;
   const query = sessionQuery.trim().toLocaleLowerCase();
-  const matchingProjects = query ? projects.filter(project => project.name.toLocaleLowerCase().includes(query)) : projects;
-  const recentSessions = useMemo(() => projects.flatMap(project => project.sessions.map(session => ({ project, session })))
-    .filter(({ project, session }) => !query || (project.name + ' ' + session.name).toLocaleLowerCase().includes(query))
-    .sort((a, b) => sessionActivity(b.session) - sessionActivity(a.session) || a.session.id.localeCompare(b.session.id)), [projects, query]);
+  const matchingProjects = query ? mergeProjects(searchResults, projects.filter(project => project.name.toLocaleLowerCase().includes(query))) : projects;
+  const recentSessions = useMemo(() => (query ? mergeProjects(searchResults, projects.flatMap(project => {
+    const sessions = project.sessions.filter(session => (project.name + ' ' + session.name).toLocaleLowerCase().includes(query));
+    return sessions.length ? [{ ...project, sessions }] : [];
+  })) : projects).flatMap(project => project.sessions.map(session => ({ project, session })))
+    .sort((a, b) => sessionActivity(b.session) - sessionActivity(a.session) || a.session.id.localeCompare(b.session.id)), [projects, query, searchResults]);
+  function selectResult(p: Project, s: Session) {
+    setProjects(current => mergeProjects(current, [{ ...p, sessions: [s] }]));
+    selectSession(p.id, s.id);
+  }
+  function moreSessions() {
+    setRecentLimit(value => value + 20);
+    if (recentSessions.length > recentLimit) return;
+    if (query && searchCursor) void searchProjects(sessionQuery.trim(), searchCursor);
+    else if (!query && projectCursor) void refreshProjects('', projectCursor).catch(e => setError(e.message));
+  }
   if (boot) return <div className="boot"><Logo/><span>正在连接工作空间…</span></div>;
   if (!user) return <main className="auth-page"><div className="auth-brand"><Logo/><strong>AI 助手</strong><span>Workspace</span></div><div className="auth-intro"><div className="eyebrow">YOUR IDEAS, IN MOTION</div><h1>从一个想法，<br/>到一个完成的项目。</h1><p>与你的 AI 助手 协作，让调研、文档和日常工作<br/>在一个专属空间里完成。</p><div className="auth-features"><span><Globe size={18}/> 浏览器调研</span><span><FileText size={18}/> 文档与报告</span><span><Terminal size={18}/> 代码与自动化</span></div><div className="auth-example"><span className="tiny-label">一个工作空间，无限可能</span><p>“整理最新资料，生成一份调研报告”</p><div><span className="dot"/> AI 助手 已准备好</div></div></div><section className="auth-card"><h2>{mode === 'login' ? '欢迎回来' : '创建你的账号'}</h2><p>{mode === 'login' ? '登录后继续共享项目与对话' : '登录后共享执行端工作空间'}</p><form onSubmit={authenticate}><label>账号<input name="username" autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} required minLength={3} maxLength={40} placeholder="输入账号"/></label><label>密码<input name="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={e => setPassword(e.target.value)} required minLength={8} maxLength={128} placeholder="至少 8 个字符"/></label>{error && <div role="alert" className="inline-error">{error}</div>}{notice && <div className="notice">{notice}</div>}<button className="primary auth-submit" disabled={busy}>{busy ? '正在处理…' : mode === 'login' ? '登录' : '注册并登录'}<ArrowUp size={17}/></button></form>{allowRegistration && <div className="auth-switch">{mode === 'login' ? '还没有账号？' : '已经有账号？'}<button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }}>{mode === 'login' ? '创建账号' : '返回登录'}</button></div>}<p className="auth-footnote">你的项目、对话与文件，始终有序。</p></section><div className="auth-footer">AI ASSISTANT WORKSPACE <span>一个轻量、专注的协作空间</span></div></main>;
   return <div className={'app ' + (!sidebar ? 'sidebar-hidden' : '')} onKeyDown={event => { if (event.key === 'Escape' && drawerOpen && !dialog) closeDrawer(); }}>
     {drawerOpen && <div className="mobile-backdrop" aria-hidden="true" onClick={closeDrawer}/>}
     {sidebar && <aside className="sidebar" aria-label="项目与会话" ref={isMobile ? drawer : undefined}><div className="sidebar-top"><div className="brand"><Logo small/><strong>AI 助手</strong></div><button className="icon-button" title="收起侧栏" aria-label="收起侧栏" onClick={() => setSidebar(false)}><PanelLeftClose size={18}/></button></div><button className="new-project" onClick={() => openDialog({ type: 'project', title: '新建项目' })}><Plus size={18}/> 新建项目</button><label className="sidebar-search"><span>搜索项目或会话</span><input type="search" aria-label="搜索项目或会话" placeholder="搜索项目或会话…" value={sessionQuery} onChange={event => { setSessionQuery(event.target.value); setRecentLimit(8); }}/></label><nav className="project-tree" aria-label="会话导航">
       <div className="section-label">{query ? '搜索结果' : '最近会话'} <span>{recentSessions.length}</span></div>
-      <div className="recent-sessions">{recentSessions.slice(0, recentLimit).map(({ project: p, session: s }) => <button key={s.id} className={'recent-session '+(sid===s.id?'active':'')} onClick={() => selectSession(p.id,s.id)} title={s.name+' · '+p.cwd}>{sessionIndicator(s,15)}<span><strong>{s.name}</strong><small>{p.name}</small></span></button>)}
+      <div className="recent-sessions">{recentSessions.slice(0, recentLimit).map(({ project: p, session: s }) => <button key={s.id} className={'recent-session '+(sid===s.id?'active':'')} onClick={() => selectResult(p,s)} title={s.name+' · '+p.cwd}>{sessionIndicator(s,15)}<span><strong>{s.name}</strong><small>{p.name}</small></span></button>)}
       {recentSessions.length===0 && <p className="sidebar-empty">{query ? (matchingProjects.length ? '匹配的项目下暂无会话' : '没有找到匹配的会话') : '新建会话后会显示在这里'}</p>}
-      {recentSessions.length>recentLimit && <button className="load-more-sessions" onClick={() => setRecentLimit(value => value+20)}>查看更多会话 <ChevronDown size={13}/></button>}</div>
+      {(recentSessions.length>recentLimit || (query ? searchCursor : projectCursor)) && <button className="load-more-sessions" disabled={projectLoading} onClick={moreSessions}>查看更多会话 <ChevronDown size={13}/></button>}</div>
       {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled title="请逐个归档会话，目录单独管理" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}>{sessionIndicator(s,14)}<span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}</nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>共享工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
     <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project||!canFiles} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     {!error && retry && retry.sessionId === sid && <div role="status" className="error-banner"><AlertCircle size={16}/><span>{retry.message}</span><button onClick={() => setRetry(null)} aria-label="关闭重连提示"><X size={15}/></button></div>}
-    <div className="chat-scroll" ref={scroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}{items.map(item => <ChatItem key={item.id} item={item} projectId={pid}/>)}{running && <div className="working"><span className="pulse"/> AI 助手 正在工作<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
+    <div className="chat-region"><div className="chat-scroll" ref={scroll} onScroll={onChatScroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}{items.map(item => <ChatItem key={item.id} item={item} projectId={pid} threadId={sid} lowData={isMobile}/>)}{running && <div className="working"><span className="pulse"/> AI 助手 正在工作<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
       await post(sessionUrl()+'/approval', {requestId:a.id, ...answer});
       if (selection.current.sid === sid) setApprovals(current => current.filter(request => request !== a));
     }}/> : a.method === "item/tool/requestUserInput" ? <UserInputRequest key={JSON.stringify([sid, a.id])} questions={a.params.questions} onSubmit={async answers => {
       await post(sessionUrl()+'/approval', {requestId:a.id, answers});
       if (selection.current.sid === sid) setApprovals(current => current.filter(request => request !== a));
-    }}/> : <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method.endsWith('/requestApproval') ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}</div>}</div>
-    <div className="composer-wrap">{uploadProgress && <div className="notice" role="status">正在上传 {uploadProgress}，失败后重新选择文件可续传</div>}<form className="composer" onSubmit={e => send(e,running)}>
+    }}/> : <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method === 'item/permissions/requestApproval' && <pre className="permission-request">{JSON.stringify(a.params.permissions, null, 2)}</pre>}{['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'].includes(a.method) ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}</div>}</div>
+    {session && awayFromBottom && <button type="button" className="jump-latest" onClick={jumpToLatest} aria-label="回到最新消息" title="回到最新消息"><ChevronDown size={19}/>{newMessages && <span>有新消息</span>}</button>}</div>
+    <ComposerDraft key={sid} drafts={drafts.current} sessionId={sid}>{(message, setMessage) => <div className="composer-wrap">{uploadProgress && <div className="notice" role="status">正在上传 {uploadProgress}，失败后重新选择文件可续传</div>}<form className="composer" onSubmit={e => send(e, message, () => setMessage(''), running)}>
     {images.length > 0 && <div className="image-attachments">{images.map((file,index) => <div className="image-attachment" key={index} title={`${file.name} · ${formatBytes(file.size)}`}>{file.image ? <img src={file.data} alt={`待发送图片 ${index+1}`}/> : <div className="file-attachment"><FileText size={22}/><span>{file.name}<small>{formatBytes(file.size)}</small></span></div>}<button type="button" aria-label={`移除${file.image ? '图片' : '附件'} ${index+1}`} disabled={busy} onClick={() => setImages(current => current.filter((_,i) => i !== index))}><X size={14}/></button></div>)}</div>}
-    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected&&(!running||canSteer))send(e as any,running)}}}/><div className="composer-bottom"><span><span className="dot"/> AI 助手 <ChevronDown size={12}/></span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（支持分块上传和断点续传）" aria-label="添加文件" disabled={!session||busy||readingFiles||!canFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?(canSteer?'追加到当前任务':'等待当前任务完成'):'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles||(running&&!canSteer)}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>所有登录用户共享当前执行端</span></div></div></main>
+    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected&&(!running||canSteer))send(e, message, () => setMessage(''), running)}}}/><div className="composer-bottom"><span>{status.capabilities?.plan && session ? <button type="button" className="mode-button" disabled={running || busy} aria-pressed={planMode === true} onClick={() => setPlanMode(value => !value)}>{planMode ? '计划模式' : '普通模式'}</button> : <><span className="dot"/> AI 助手</>}</span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（支持分块上传和断点续传）" aria-label="添加文件" disabled={!session||busy||readingFiles||!canFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?(canSteer?'追加到当前任务':'等待当前任务完成'):'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles||(running&&!canSteer)}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>所有登录用户共享当前执行端</span></div></div>}</ComposerDraft></main>
     {filePanel && project && <aside className="file-panel" aria-label="项目文件" ref={isMobile ? drawer : undefined}><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<File size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title={file.directory?'删除文件夹':'删除文件'} disabled={busy||running} aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:file.directory?'删除文件夹':'删除文件',project,file,relative})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
     {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type==='archive-session' ? <p className="delete-warning">确定归档「{dialog.session?.name}」？会话将从共享列表移除，历史、目录和文件会保留。</p> : dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'目录分组由执行端会话决定，请逐个归档会话。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}{dialog.type==='project' ? <ProjectLocation request={api} onChange={setProjectLocation}/> : dialog.type==='session'&&!canRenameThread ? <p className="delete-warning">将在当前项目中创建新会话。当前桌面连接服务尚未支持自定义名称，更新后可修改名称。</p> : <label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:undefined} autoComplete={dialog.type==='password'?'new-password':'off'}/></label>}</>}{dialog.type==='project' && notice && <div className="notice">{notice}</div>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy||(dialog.type==='project'&&!projectLocation)}>{busy?'正在处理…':dialog.type==='archive-session'?'确认归档':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
   </div>;
+}
+function ComposerDraft({ drafts, sessionId, children }: {
+  drafts: Map<string, string>; sessionId: string;
+  children: (message: string, setMessage: (value: string) => void) => React.ReactNode;
+}) {
+  const [message, setMessage] = useState(() => drafts.get(sessionId) || '');
+  return children(message, value => {
+    if (value) drafts.set(sessionId, value);
+    else drafts.delete(sessionId);
+    setMessage(value);
+  });
 }
 type InputQuestion = { id: string; header: string; question: string; isOther: boolean; isSecret: boolean;
   options: { label: string; description: string }[] | null };
@@ -453,8 +759,7 @@ function MessageImages({content,projectId}:{content:any[];projectId:string}) {
   })}</div>;
 }
 function MessageImage({src, index}:{src:string; index:number}) {
-  const [missing, setMissing] = useState(false);
-  return missing ? <span>图片不存在或无法读取</span> : <a href={src} target="_blank" rel="noopener noreferrer"><img src={src} alt={`消息图片 ${index+1}`} loading="lazy" onError={() => setMissing(true)}/></a>;
+  return <ReplyImage src={src} alt={`消息图片 ${index + 1}`}/>;
 }
 function MessageFile({name, relative, projectId}:{name:string; relative:string; projectId:string}) {
   const [error, setError] = useState('');
@@ -481,13 +786,32 @@ function UserMessage({content, projectId}:{content:any[]; projectId:string}) {
     return <React.Fragment key={index}>{line}{'\n'}</React.Fragment>;
   })}</div></div>;
 }
-function ChatItem({item, projectId}:{item:Item; projectId:string}) {
+function DeferredOutput({ item, projectId, threadId }: { item: Item; projectId: string; threadId: string }) {
+  const [output, setOutput] = useState<string | null>(null), [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  async function load() {
+    if (loading || !item.turnId) return;
+    setLoading(true); setError('');
+    try {
+      const query = new URLSearchParams({ view: 'items', turn: item.turnId, output: item.id });
+      const result = await api(`/projects/${projectId}/sessions/${threadId}/history?${query}`);
+      setOutput(result.output);
+    } catch (e: any) { setError(e.message); }
+    finally { setLoading(false); }
+  }
+  return output === null ? <div className="tool-output">
+    <button type="button" className="secondary" onClick={load} disabled={loading}>{loading ? '正在加载…' : '加载完整输出'}</button>
+    {error && <p role="alert">{error}</p>}
+  </div> : <pre className="tool-output">{output}</pre>;
+}
+
+const ChatItem = memo(function ChatItem({item, projectId, threadId, lowData}:{item:Item; projectId:string; threadId:string; lowData:boolean}) {
   if(item.type==='reasoning')return null;
   if(item.type==='userMessage')return <UserMessage content={item.content || []} projectId={projectId}/>;
-  if(item.type==='agentMessage')return <article className="agent-message"><div className="agent-label"><Logo small/><span>AI 助手</span></div><div className="markdown"><ReplyMarkdown text={item.text || ''} projectId={projectId}/></div></article>;
-  if(item.type==='imageView')return <ReturnedImage value={(item as Item & {path:string}).path} projectId={projectId}/>;
-  if(item.type==='commandExecution')return <details className="tool-item"><summary><Terminal size={14}/><span>{item.status==='inProgress'?'正在执行命令':'执行命令'}</span><small>{item.status==='completed'?'完成':item.status==='inProgress'?'运行中':item.status}</small><ChevronDown size={13}/></summary><pre>{item.command}</pre>{item.aggregatedOutput&&<pre className="tool-output">{item.aggregatedOutput}</pre>}</details>;
+  if(item.type==='agentMessage')return <article className="agent-message"><div className="agent-label"><Logo small/><span>AI 助手</span></div><div className="markdown"><Suspense fallback={<div className="plain-reply">{item.text}</div>}><ReplyMarkdown text={item.text || ''} projectId={projectId} lowData={lowData}/></Suspense></div></article>;
+  if(item.type==='imageView')return <Suspense fallback={<span>正在加载图片…</span>}><ReturnedImage value={(item as Item & {path:string}).path} projectId={projectId} lowData={lowData}/></Suspense>;
+  if(item.type==='commandExecution')return <details className="tool-item"><summary><Terminal size={14}/><span>{item.status==='inProgress'?'正在执行命令':'执行命令'}</span><small>{item.status==='completed'?'完成':item.status==='inProgress'?'运行中':item.status}</small><ChevronDown size={13}/></summary><pre>{item.command}</pre>{item.outputDeferred ? <DeferredOutput item={item} projectId={projectId} threadId={threadId}/> : item.aggregatedOutput && <pre className="tool-output">{item.aggregatedOutput}</pre>}</details>;
   if(item.type==='fileChange')return <details className="tool-item"><summary><FileText size={14}/><span>文件修改</span><ChevronDown size={13}/></summary><pre>{JSON.stringify(item.changes,null,2)}</pre></details>;
   return <div className="other-event"><Check size={13}/>{item.type}</div>;
-}
+});
 createRoot(document.getElementById('root')!).render(<App/>);

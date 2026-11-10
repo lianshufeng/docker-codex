@@ -5,6 +5,64 @@ import express from 'express';
 import { sharedApi } from '../server/shared-api.mjs';
 import { projectId } from '../server/app-workspace.mjs';
 
+test('paged projects fetch one upstream page and restore the selected session separately', async () => {
+  const bus = new EventEmitter();
+  bus.state = { runId: 'test', state: 'ready' };
+  const cwd = '/workspace/test', calls = [];
+  bus.rpc = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/read') return { thread: { id: params.threadId, cwd } };
+    return { data: Array.from({ length: 30 }, (_, i) => ({ id: String(i), cwd })), nextCursor: 'next' };
+  };
+  const app = express();
+  app.use(sharedApi(bus, {}, () => {}).router);
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise(resolve => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}/projects?view=page`;
+    const first = await (await fetch(base + '&selected=saved')).json();
+    assert.equal(first.nextCursor, 'next');
+    assert.equal(first.projects[0].sessions.length, 31);
+    assert.ok(first.projects[0].sessions.some(s => s.id === 'saved'));
+    assert.deepEqual(calls.map(call => call.method), ['thread/list', 'thread/read']);
+    assert.equal(calls[0].params.limit, 30);
+    await fetch(base + '&cursor=next&q=' + encodeURIComponent('中文'));
+    assert.equal(calls[2].params.cursor, 'next');
+    assert.equal(calls[2].params.searchTerm, '中文');
+    assert.equal(calls.length, 3);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('retrying an accepted message does not start or steer a second turn', async () => {
+  const bus = new EventEmitter();
+  bus.state = { runId: 'test', state: 'ready' };
+  bus.ready = () => true;
+  const cwd = '/workspace/test', calls = [];
+  bus.rpc = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/read') return { thread: { id: params.threadId, cwd, status: { type: 'idle' } } };
+    if (method === 'config/read') return { config: { model: 'test-model' } };
+    if (method === 'turn/start') return { turn: { id: 'turn' } };
+    assert.fail(method);
+  };
+  const app = express();
+  app.use(sharedApi(bus, {}, () => {}).router);
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    await new Promise(resolve => server.once('listening', resolve));
+    const endpoint = `http://127.0.0.1:${server.address().port}/projects/${projectId(cwd)}/sessions/thread/messages`;
+    const send = steer => fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: '0'.repeat(32), text: '中文', steer, plan: true }) });
+    assert.deepEqual(await (await send(false)).json(), { turnId: 'turn' });
+    assert.deepEqual(await (await send(true)).json(), { turnId: 'turn', duplicate: true });
+    const starts = calls.filter(call => call.method === 'turn/start');
+    assert.equal(starts.length, 1);
+    assert.deepEqual(starts[0].params.collaborationMode, { mode: 'plan', settings: {
+      model: 'test-model', reasoning_effort: null, developer_instructions: null } });
+    assert.equal(calls.some(call => call.method === 'turn/steer'), false);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('interactive requests validate answers and forward the response for each protocol', async () => {
   const bus = new EventEmitter();
   bus.state = { runId: 'test', state: 'ready' };
@@ -60,13 +118,23 @@ test('interactive requests validate answers and forward the response for each pr
     assert.equal((await submit('target', { requestId: 5, action: 'decline' })).status, 200);
     elicit(6, { mode: 'url', url: 'https://example.com/' });
     assert.equal((await submit('target', { requestId: 6, action: 'accept' })).status, 200);
+    elicit(7, { mode: 'openai/form', requestedSchema: { type: 'object', required: ['name'],
+      properties: { name: { type: 'string' } } } });
+    assert.equal((await submit('target', { requestId: 7, action: 'accept', content: { name: '中文' } })).status, 200);
+    ask(8, [{ id: 'text', options: null }]);
+    assert.equal((await submit('target', { requestId: 8, answers: { text: '自由输入' } })).status, 200);
+    ask(9, [color]);
+    bus.emit('notification', { method: 'serverRequest/resolved', params: { threadId: 'target', requestId: '9' } }, bus.state.runId);
+    assert.equal((await submit('target', { requestId: 9, answers: { color: '蓝色' } })).status, 404);
     assert.deepEqual(published, [
       { id: 1, result: { answers: { color: { answers: ['蓝色'] } } } },
       { id: 2, result: { answers: { color: { answers: ['蓝色'] }, size: { answers: ['大'] } } } },
       { id: 3, result: { action: 'accept', content, _meta: null } },
       { id: 4, result: { action: 'cancel', content: null, _meta: null } },
       { id: 5, result: { action: 'decline', content: null, _meta: null } },
-      { id: 6, result: { action: 'accept', content: null, _meta: null } }
+      { id: 6, result: { action: 'accept', content: null, _meta: null } },
+      { id: 7, result: { action: 'accept', content: { name: '中文' }, _meta: null } },
+      { id: 8, result: { answers: { text: { answers: ['自由输入'] } } } }
     ]);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

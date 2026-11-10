@@ -17,12 +17,17 @@ export const projectOf = cwd => ({ id: projectId(cwd), cwd, name: pathApi(cwd).b
 export const sessionOf = thread => ({ id: thread.id, threadId: thread.id, name: thread.name || thread.preview?.split(/\r?\n|附件：/)[0].trim().slice(0, 80) || '新会话',
   createdAt: new Date((thread.createdAt || 0) * 1000).toISOString(), updatedAt: new Date((thread.updatedAt || 0) * 1000).toISOString() });
 
+export function listThreadPage(bus, params = {}) {
+  return bus.rpc('thread/list', { sourceKinds: ['cli', 'vscode', 'appServer', 'exec', 'unknown'],
+    modelProviders: [], limit: 100, ...params });
+}
+
 export async function listThreads(bus, params = {}) {
   const generation = bus.state?.runId;
   const threads = new Map(), cursors = new Set();
   let cursor;
   do {
-    const page = await bus.rpc('thread/list', { sourceKinds: ['cli', 'vscode', 'appServer', 'exec', 'unknown'], modelProviders: [], limit: 100, ...params, cursor });
+    const page = await listThreadPage(bus, { ...params, cursor });
     for (const thread of page.data) threads.set(thread.id, thread);
     cursor = page.nextCursor;
     if (cursor && cursors.has(cursor)) throw new HttpError(502, '执行端重复返回同一个分页游标');

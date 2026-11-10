@@ -1,4 +1,5 @@
-import React, { useId, useState } from 'react';
+import React, { useId } from 'react';
+import { ReplyImage } from './message-image';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -23,27 +24,22 @@ export function imageSource(value: string, projectId: string) {
   try { decoded = decodeURIComponent(value); } catch { return ''; }
   return `/api/projects/${encodeURIComponent(projectId)}/image?path=${encodeURIComponent(decoded)}`;
 }
-function ReplyImage({src, alt = '返回的图片'}:{src:string;alt?:string}) {
-  const [failed, setFailed] = useState(false);
-  if (!src) return <span>[图片地址不可用]</span>;
-  return <a className="reply-image" href={src} target="_blank" rel="noopener noreferrer">{failed ? <span>图片暂不可用，点击重试：{alt}</span> : <img src={src} alt={alt} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)}/>}</a>;
-}
-export function ReplyMarkdown({text, projectId}:{text:string;projectId:string}) {
+export function ReplyMarkdown({text, projectId, lowData}:{text:string;projectId:string;lowData?:boolean}) {
   const footnotePrefix = `reply-${useId()}-`;
   return <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} remarkRehypeOptions={{ clobberPrefix: footnotePrefix }} urlTransform={(url, key) => {
     // Preserve normal remote Markdown images, including image URLs without extensions.
     if (key === 'src' && /^https?:\/\//i.test(url)) return url;
     return imageSource(url, projectId) || defaultUrlTransform(url);
   }} components={{
-    img: ({src,alt}) => <ReplyImage key={src} src={src || ''} alt={alt}/>,
+    img: ({src,alt}) => <ReplyImage key={src} src={src || ''} alt={alt} lowData={lowData}/>,
     table: ({children}) => <div className="markdown-table" role="region" aria-label="表格" tabIndex={0}><table>{children}</table></div>,
     a: ({href,children,node,...props}) => {
       const image = href?.startsWith(`/api/projects/${encodeURIComponent(projectId)}/image?`) || (href && imageSource(href, projectId));
-      return image ? <ReplyImage src={href || ''} alt={typeof children === 'string' ? children : '返回的图片'}/> : <a {...props} href={href} target={href?.startsWith('#') ? undefined : '_blank'} rel="noopener noreferrer">{children}</a>;
+      return image ? <ReplyImage src={href || ''} lowData={lowData} alt={typeof children === 'string' ? children : '返回的图片'}/> : <a {...props} href={href} target={href?.startsWith('#') ? undefined : '_blank'} rel="noopener noreferrer">{children}</a>;
     },
   }}>{text}</ReactMarkdown>;
 }
 
-export function ReturnedImage({value,projectId}:{value:string;projectId:string}) {
-  return <ReplyImage src={imageSource(value,projectId)}/>;
+export function ReturnedImage({value,projectId,lowData}:{value:string;projectId:string;lowData?:boolean}) {
+  return <ReplyImage src={imageSource(value,projectId)} lowData={lowData}/>;
 }

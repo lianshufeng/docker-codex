@@ -53,6 +53,8 @@ Before starting, set `mqtt.url` in `web/config.json` to `mqtt://host.docker.inte
 
 Web uses one MQTT interface for Docker and Windows desktop. Both bridges forward standard app-server JSON-RPC, so only the MQTT address, port, and credentials change. Sessions come from app-server and files from the execution endpoint. Web needs no workspace mount. Full file support requires bridge forwarding for `fs/*` and chunked transfers. [Windows setup and limitations (Chinese)](web/README.md#连接-windows-桌面)
 
+The first view loads 30 recent sessions and up to 50 history items for the selected session. Load earlier messages from the top or jump back to the latest message. The browser subscribes to content for the selected session, fetches long command output on demand, and previews local reply images as thumbnails. With a compatible execution endpoint, switch to Plan mode below the composer to receive and answer interactive questions.
+
 Native Windows uses `mqtt://127.0.0.1:1883`. Containers reach the host through `mqtt://host.docker.internal:1883`. The startup script automatically reinstalls platform-specific dependencies when switching runtime platforms.
 
 ## Features and how it works

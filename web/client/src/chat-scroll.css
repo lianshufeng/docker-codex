@@ -1,0 +1,35 @@
+.chat-region {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-region .chat-scroll { scroll-behavior: auto; overflow-anchor: none; }
+.plain-reply { white-space: pre-wrap; }
+.mode-button { padding: 6px; }
+
+.jump-latest {
+  position: absolute;
+  right: 24px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid #505050;
+  border-radius: 24px;
+  background: #303030;
+  color: #f0f0f0;
+  box-shadow: 0 2px 8px #0006;
+}
+
+@media (max-width: 800px) {
+  .jump-latest { right: max(12px, env(safe-area-inset-right)); }
+  .composer-wrap { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .send-button, .stop-button { min-width: 44px; min-height: 44px; }
+  .composer .mode-button, .composer .icon-button { min-height: 44px; min-width: 44px; }
+}

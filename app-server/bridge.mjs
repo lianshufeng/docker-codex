@@ -120,7 +120,7 @@ function startChild() {
   initTimer = setTimeout(() => failChild('initialize_timeout'), 15000);
   target.stdin.write(JSON.stringify({ id: '__bridge_initialize', method: 'initialize', params: {
     clientInfo: { name: 'codex_mqtt_bridge', title: 'Codex MQTT Bridge', version: '1.0.0' },
-    capabilities: { experimentalApi: true },
+    capabilities: { experimentalApi: true, mcpServerOpenaiFormElicitation: true },
   } }) + '\n');
 }
 client.on('connect', () => {

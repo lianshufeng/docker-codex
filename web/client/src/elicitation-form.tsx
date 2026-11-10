@@ -42,7 +42,7 @@ export function ElicitationForm({ request, respond }: {
   respond: (answer: { action: Action; content?: Record<string, unknown> }) => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
-  const fields = request.mode === 'form' ? formFields(request.requestedSchema) : null;
+  const fields = ['form', 'openai/form'].includes(request.mode) ? formFields(request.requestedSchema) : null;
   const url = request.mode === 'url' ? externalUrl(request.url) : null;
   async function send(action: Action, content?: Record<string, unknown>) {
     if (busy) return;
