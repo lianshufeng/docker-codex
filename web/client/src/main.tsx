@@ -71,7 +71,9 @@ function App() {
   const [sessionQuery, setSessionQuery] = useState(''), [recentLimit, setRecentLimit] = useState(8);
   const [projectCursor, setProjectCursor] = useState<string | null>(null), [searchCursor, setSearchCursor] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<Project[]>([]);
-  const [projectLoading, setProjectLoading] = useState(false);
+  const [projectLoading, setProjectLoading] = useState(false), [searchLoading, setSearchLoading] = useState(false);
+  const [projectCatalogLoaded, setProjectCatalogLoaded] = useState(false);
+  const projectCatalog = useRef(false);
   const sidebar = isMobile ? mobileSidebar : desktopSidebar;
   const drawerOpen = isMobile && (sidebar || (filePanel && Boolean(pid)));
   const [status, setStatus] = useState<any>({ connected: false, state: 'connecting' });
@@ -138,20 +140,26 @@ function App() {
   }
   const projectsVersion = useRef(0);
   const projectRequest = useRef<AbortController | null>(null);
-  async function refreshProjects(selected = selection.current.sid, more?: string, merge = false) {
+  async function refreshProjects(selected = selection.current.sid, more?: string, merge = false, loadCatalog = false) {
+    if (merge && projectRequest.current) return [];
     projectRequest.current?.abort();
     const request = new AbortController();
     projectRequest.current = request;
     const version = ++projectsVersion.current;
     const turnAt = turnVersion.current;
-    const params = new URLSearchParams({ view: 'page', selected });
+    const full = loadCatalog || (!merge && projectCatalog.current);
+    const params = new URLSearchParams(full ? {} : { view: 'page', selected });
     if (more) params.set('cursor', more);
     setProjectLoading(true);
     try {
-      const result = await api('/projects?' + params, { signal: request.signal });
+      const result = await api(full ? '/projects' : '/projects?' + params, { signal: request.signal });
       if (version === projectsVersion.current) {
         setProjects(current => more || merge ? mergeProjects(current, result.projects) : result.projects);
-        if (!merge || more) setProjectCursor(result.nextCursor);
+        if (!merge || more) setProjectCursor(result.nextCursor ?? null);
+        if (full) {
+          projectCatalog.current = true;
+          setProjectCatalogLoaded(true);
+        }
         setTurnActivity(current => {
           const received = new Set<string>(result.projects.flatMap((p: Project) => p.sessions.map(s => s.id)));
           return new Map([...current].filter(([id, activity]) => !received.has(id) || activity.version > turnAt));
@@ -162,7 +170,10 @@ function App() {
       if (!request.signal.aborted) throw error;
       return [];
     } finally {
-      if (version === projectsVersion.current) setProjectLoading(false);
+      if (version === projectsVersion.current) {
+        projectRequest.current = null;
+        setProjectLoading(false);
+      }
     }
   }
   const searchRequest = useRef<AbortController | null>(null);
@@ -172,6 +183,7 @@ function App() {
     searchRequest.current = request;
     const params = new URLSearchParams({ view: 'page', q: query });
     if (more) params.set('cursor', more);
+    setSearchLoading(true);
     try {
       const result = await api('/projects?' + params, { signal: request.signal });
       if (!request.signal.aborted) {
@@ -179,10 +191,11 @@ function App() {
         setSearchCursor(result.nextCursor);
       }
     } catch (e: any) { if (!request.signal.aborted) setError(e.message); }
+    finally { if (!request.signal.aborted) setSearchLoading(false); }
   }
   useEffect(() => {
     const query = sessionQuery.trim();
-    setSearchResults([]); setSearchCursor(null);
+    setSearchResults([]); setSearchCursor(null); setSearchLoading(false);
     if (!query || !user) return;
     const timer = setTimeout(() => void searchProjects(query), 300);
     return () => { clearTimeout(timer); searchRequest.current?.abort(); };
@@ -306,6 +319,8 @@ function App() {
     try { savedUnread = JSON.parse(localStorage.getItem(unreadKey) || '[]'); } catch {}
     setUnread({ userId: user.id, sessions: new Set(Array.isArray(savedUnread) ? savedUnread : []) });
     setTurnActivity(new Map());
+    projectCatalog.current = false;
+    setProjectCatalogLoaded(false);
     setProjects([]); setItems([]); setApprovals([]); setRetry(null); setPid(''); setSid(''); setSessionQuery(''); setRecentLimit(8);
     let disposed = false, socket: WebSocket, timer: ReturnType<typeof setTimeout>;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined, reconnects = 0, previousRun: string | undefined;
@@ -656,11 +671,16 @@ function App() {
     setProjects(current => mergeProjects(current, [{ ...p, sessions: [s] }]));
     selectSession(p.id, s.id);
   }
-  function moreSessions() {
-    setRecentLimit(value => value + 20);
-    if (recentSessions.length > recentLimit) return;
+  const pageLoading = query ? searchLoading : projectLoading;
+  const sessionCursor = query ? searchCursor : projectCursor;
+  function loadNextSessionPage() {
+    if (pageLoading) return;
     if (query && searchCursor) void searchProjects(sessionQuery.trim(), searchCursor);
     else if (!query && projectCursor) void refreshProjects('', projectCursor).catch(e => setError(e.message));
+  }
+  function moreSessions() {
+    setRecentLimit(value => value + 20);
+    if (recentSessions.length <= recentLimit) loadNextSessionPage();
   }
   if (boot) return <div className="boot"><Logo/><span>正在连接工作空间…</span></div>;
   if (!user) return <main className="auth-page"><div className="auth-brand"><Logo/><strong>AI 助手</strong><span>Workspace</span></div><div className="auth-intro"><div className="eyebrow">YOUR IDEAS, IN MOTION</div><h1>从一个想法，<br/>到一个完成的项目。</h1><p>与你的 AI 助手 协作，让调研、文档和日常工作<br/>在一个专属空间里完成。</p><div className="auth-features"><span><Globe size={18}/> 浏览器调研</span><span><FileText size={18}/> 文档与报告</span><span><Terminal size={18}/> 代码与自动化</span></div><div className="auth-example"><span className="tiny-label">一个工作空间，无限可能</span><p>“整理最新资料，生成一份调研报告”</p><div><span className="dot"/> AI 助手 已准备好</div></div></div><section className="auth-card"><h2>{mode === 'login' ? '欢迎回来' : '创建你的账号'}</h2><p>{mode === 'login' ? '登录后继续共享项目与对话' : '登录后共享执行端工作空间'}</p><form onSubmit={authenticate}><label>账号<input name="username" autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} required minLength={3} maxLength={40} placeholder="输入账号"/></label><label>密码<input name="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={e => setPassword(e.target.value)} required minLength={8} maxLength={128} placeholder="至少 8 个字符"/></label>{error && <div role="alert" className="inline-error">{error}</div>}{notice && <div className="notice">{notice}</div>}<button className="primary auth-submit" disabled={busy}>{busy ? '正在处理…' : mode === 'login' ? '登录' : '注册并登录'}<ArrowUp size={17}/></button></form>{allowRegistration && <div className="auth-switch">{mode === 'login' ? '还没有账号？' : '已经有账号？'}<button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }}>{mode === 'login' ? '创建账号' : '返回登录'}</button></div>}<p className="auth-footnote">你的项目、对话与文件，始终有序。</p></section><div className="auth-footer">AI ASSISTANT WORKSPACE <span>一个轻量、专注的协作空间</span></div></main>;
@@ -670,8 +690,12 @@ function App() {
       <div className="section-label">{query ? '搜索结果' : '最近会话'} <span>{recentSessions.length}</span></div>
       <div className="recent-sessions">{recentSessions.slice(0, recentLimit).map(({ project: p, session: s }) => <button key={s.id} className={'recent-session '+(sid===s.id?'active':'')} onClick={() => selectResult(p,s)} title={s.name+' · '+p.cwd}>{sessionIndicator(s,15)}<span><strong>{s.name}</strong><small>{p.name}</small></span></button>)}
       {recentSessions.length===0 && <p className="sidebar-empty">{query ? (matchingProjects.length ? '匹配的项目下暂无会话' : '没有找到匹配的会话') : '新建会话后会显示在这里'}</p>}
-      {(recentSessions.length>recentLimit || (query ? searchCursor : projectCursor)) && <button className="load-more-sessions" disabled={projectLoading} onClick={moreSessions}>查看更多会话 <ChevronDown size={13}/></button>}</div>
-      {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled title="请逐个归档会话，目录单独管理" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}>{sessionIndicator(s,14)}<span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}</nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>共享工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
+      {(recentSessions.length>recentLimit || sessionCursor) && <button className="load-more-sessions" disabled={pageLoading} onClick={moreSessions}>查看更多会话 <ChevronDown size={13}/></button>}</div>
+      {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled title="请逐个归档会话，目录单独管理" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}>{sessionIndicator(s,14)}<span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}
+      {query ? searchCursor && <button className="load-more-sessions" disabled={searchLoading} onClick={loadNextSessionPage}>加载更多搜索结果 <ChevronDown size={13}/></button>
+        : projectCatalogLoaded ? <p className="sidebar-empty">已显示执行端提供的全部项目</p>
+          : <button className="load-more-sessions" disabled={projectLoading} onClick={() => void refreshProjects(undefined, undefined, false, true).catch(e => setError(e.message))}>{projectLoading ? '正在加载…' : '加载更多项目'} <ChevronDown size={13}/></button>}
+      </nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>共享工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
     <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project||!canFiles} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     {!error && retry && retry.sessionId === sid && <div role="status" className="error-banner"><AlertCircle size={16}/><span>{retry.message}</span><button onClick={() => setRetry(null)} aria-label="关闭重连提示"><X size={15}/></button></div>}
