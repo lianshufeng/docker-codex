@@ -110,8 +110,16 @@ export function imagePath(root, value) {
   const api = pathApi(root);
   if (api === path.win32) value = value.replace(/^\/(?=[a-z]:\/)/i, '').replaceAll('\\', '/');
   if (api.isAbsolute(value)) {
-    value = api.relative(root, value);
-    requireValue(!api.isAbsolute(value), '图片路径越界');
+    const relative = api.relative(root, value);
+    value = api.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${api.sep}`)
+      ? absolute(api.resolve(root, value)) : relative;
   }
   return value.replaceAll(api.sep, '/').replace(/^\.\//, '');
+}
+
+export function imageLocation(root, value) {
+  const resolved = imagePath(root, value), api = pathApi(root);
+  if (!api.isAbsolute(resolved)) return { root, relative: resolved };
+  const volume = api.parse(resolved).root;
+  return { root: volume, relative: api.relative(volume, resolved).replaceAll(api.sep, '/') };
 }

@@ -7,7 +7,7 @@ import sharp from 'sharp';
 import { FileTransport, chunkBytes, checksum } from './file-transport.mjs';
 import { Locks, HttpError, requireValue, displayName } from './storage.mjs';
 import { decodeImages, decodeFiles } from './images.mjs';
-import { absolute, projectId, projectOf, sessionOf, listThreadPage, listThreads, checkedPath, imagePath, projectOptions, linuxProjectPath } from './app-workspace.mjs';
+import { absolute, projectId, projectOf, sessionOf, listThreadPage, listThreads, checkedPath, imageLocation, projectOptions, linuxProjectPath } from './app-workspace.mjs';
 import { historyPage } from './history-page.mjs';
 import { projectCatalog } from './project-catalog.mjs';
 
@@ -86,7 +86,7 @@ export function sharedApi(bus, config, broadcast) {
     if (!transport) throw new HttpError(409, '文件服务不可用');
     const generation = context.getStore().runId;
     if (generation !== bus.state.runId) throw new HttpError(503, '执行端已变化，请重试');
-    return transport.request({ ...operation, root: root(req) }, data);
+    return transport.request({ root: root(req), ...operation }, data);
   }
   router.post('/projects/:pid/uploads', async (req, res) => {
     const cwd = root(req), size = req.body.size;
@@ -429,11 +429,13 @@ export function sharedApi(bus, config, broadcast) {
     res.json({ files: entries.filter(e => !e.fileName.startsWith('.web-')).map(e => ({ name: e.fileName, directory: e.isDirectory, size: null })) });
   });
   async function download(req, res, image = false) {
-    const relative = image ? imagePath(root(req), String(req.query.path || '')) : String(req.query.path || '');
-    const { target, stat } = await checkedPath(bus, root(req), relative, { allowRoot: false });
+    const value = String(req.query.path || '');
+    const location = image ? imageLocation(root(req), value) : { root: root(req), relative: value };
+    const { root: directory, relative } = location;
+    const { target, stat } = await checkedPath(bus, directory, relative, { allowRoot: false });
     requireValue(stat.isFile, '请选择文件');
     if (transport?.limits()) {
-      const file = await transfer(req, { op: 'open', relative });
+      const file = await transfer(req, { op: 'open', root: directory, relative });
       let start = 0, end = file.size - 1;
       res.setHeader('Accept-Ranges', 'bytes');
       res.setHeader('ETag', `"${file.version}"`);
@@ -455,7 +457,7 @@ export function sharedApi(bus, config, broadcast) {
       res.setHeader('Content-Length', Math.max(0, end - start + 1));
       if (req.method === 'HEAD') return res.end();
       for (let offset = start; offset <= end && !res.destroyed; offset += chunkBytes) {
-        const result = await transfer(req, { op: 'read', relative, offset, length: Math.min(chunkBytes, end - offset + 1), version: file.version });
+        const result = await transfer(req, { op: 'read', root: directory, relative, offset, length: Math.min(chunkBytes, end - offset + 1), version: file.version });
         requireValue(result.data.length === Math.min(chunkBytes, end - offset + 1) && checksum(result.data) === result.sha256, '下载块校验失败');
         if (!res.write(result.data)) await new Promise(resolve => {
           const done = () => { res.off('drain', done); res.off('close', done); resolve(); };
@@ -473,20 +475,20 @@ export function sharedApi(bus, config, broadcast) {
     res.send(bytes);
   }
   async function thumbnail(req, res) {
-    const relative = imagePath(root(req), String(req.query.path || ''));
+    const { root: directory, relative } = imageLocation(root(req), String(req.query.path || ''));
     requireValue(/\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(relative), '图片格式无效');
-    const { target, stat } = await checkedPath(bus, root(req), relative, { allowRoot: false });
+    const { target, stat } = await checkedPath(bus, directory, relative, { allowRoot: false });
     requireValue(stat.isFile, '请选择文件');
     const maxBytes = 12 * 1024 * 1024;
     let bytes;
     if (transport?.limits()) {
-      const file = await transfer(req, { op: 'open', relative });
+      const file = await transfer(req, { op: 'open', root: directory, relative });
       if (file.size > maxBytes) throw new HttpError(413, '图片过大，请直接查看原图');
       const chunks = [];
       for (let offset = 0; offset < file.size; offset += chunkBytes) {
         if (res.destroyed) return;
         const length = Math.min(chunkBytes, file.size - offset);
-        const part = await transfer(req, { op: 'read', relative, offset, length, version: file.version });
+        const part = await transfer(req, { op: 'read', root: directory, relative, offset, length, version: file.version });
         requireValue(part.data.length === length && checksum(part.data) === part.sha256, '下载块校验失败');
         chunks.push(part.data);
       }

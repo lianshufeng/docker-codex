@@ -2,8 +2,96 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import express from 'express';
+import path from 'node:path';
+import sharp from 'sharp';
 import { sharedApi } from '../server/shared-api.mjs';
 import { projectId } from '../server/app-workspace.mjs';
+import { chunkBytes, checksum, decodeFrame, encodeFrame } from '../server/file-transport.mjs';
+
+test('reply images support project paths and external absolute paths over RPC and chunk transport', async t => {
+  const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#fff' } }).png().toBuffer();
+  const bytes = Buffer.concat([png, Buffer.alloc(chunkBytes)]);
+  for (const windows of [false, true]) {
+    for (const chunked of [false, true]) {
+      await t.test(`${windows ? 'Windows' : 'POSIX'} ${chunked ? 'chunks' : 'RPC'}`, async () => {
+        const api = windows ? path.win32 : path.posix;
+        const cwd = windows ? 'e:\\工程' : '/workspace/工程';
+        const inside = api.join(cwd, '图.png');
+        const outside = windows ? 'C:\\Users\\测试\\Temp\\图.png' : '/tmp/测试/图.png';
+        const sibling = api.join(api.dirname(cwd), '其他', '图.png');
+        const files = new Set([inside, outside, sibling]);
+        const bus = new EventEmitter(), reads = [];
+        bus.state = { runId: 'test', state: 'ready' };
+        bus.ready = () => true;
+        bus.rpc = async (method, { path: target }) => {
+          if (method === 'fs/getMetadata') {
+            if (target.endsWith('missing.png')) throw new Error('not found');
+            return { isDirectory: !files.has(target), isFile: files.has(target),
+              isSymlink: api.basename(target) === 'link', size: bytes.length };
+          }
+          assert.equal(method, 'fs/readFile');
+          assert.ok(files.has(target), target);
+          reads.push(target);
+          return { dataBase64: bytes.toString('base64') };
+        };
+        if (chunked) {
+          bus.base = 'test';
+          bus.remote = { fileTransfer: { version: 1 } };
+          bus.client = new EventEmitter();
+          bus.client.publishAsync = async (topic, payload) => {
+            const { metadata } = decodeFrame(payload);
+            const target = api.join(metadata.root, ...metadata.relative.split('/'));
+            assert.ok(files.has(target), target);
+            let result, data;
+            if (metadata.op === 'open') result = { size: bytes.length, version: 'v1' };
+            else {
+              assert.equal(metadata.op, 'read');
+              assert.equal(metadata.version, 'v1');
+              data = bytes.subarray(metadata.offset, metadata.offset + metadata.length);
+              result = { sha256: checksum(data) };
+              reads.push(target);
+            }
+            bus.client.emit('message', topic.replace('/request/', '/reply/'), encodeFrame({ result }, data));
+          };
+        }
+        const app = express();
+        app.use(sharedApi(bus, {}, () => {}).router);
+        app.use((error, req, res, next) => res.status(error.status || 500).json({ error: error.message }));
+        const server = app.listen(0, '127.0.0.1');
+        try {
+          await new Promise(resolve => server.once('listening', resolve));
+          const base = `http://127.0.0.1:${server.address().port}/projects/${projectId(cwd)}`;
+          const fileUrl = value => 'file://' + (windows ? '/' : '') + encodeURI(value.replaceAll('\\', '/'));
+          for (const value of ['图.png', './图.png', inside, fileUrl(inside), 'sandbox:' + inside,
+            outside, fileUrl(outside), 'sandbox:' + outside, sibling]) {
+            const query = '?path=' + encodeURIComponent(value);
+            const original = await fetch(base + '/image' + query);
+            assert.equal(original.status, 200, value);
+            assert.deepEqual(Buffer.from(await original.arrayBuffer()), bytes);
+            const preview = await fetch(base + '/thumbnail' + query);
+            assert.equal(preview.status, 200, value);
+            assert.match(preview.headers.get('content-type'), /image\/webp/);
+            const dimensions = await sharp(Buffer.from(await preview.arrayBuffer())).metadata();
+            assert.equal(dimensions.width, 2);
+          }
+          assert.ok(reads.includes(outside));
+          if (chunked) {
+            const response = await fetch(base + '/image?path=' + encodeURIComponent(outside), { headers: { Range: 'bytes=1-10' } });
+            assert.equal(response.status, 206);
+            assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes.subarray(1, 11));
+          }
+          for (const route of ['image', 'thumbnail']) {
+            for (const value of ['../图.png', api.join(api.dirname(outside), '.web-private', '图.png'), api.join(api.dirname(outside), 'link', '图.png')]) {
+              assert.ok([400, 403].includes((await fetch(`${base}/${route}?path=${encodeURIComponent(value)}`)).status), value);
+            }
+            assert.equal((await fetch(`${base}/${route}?path=missing.png`)).status, 404);
+          }
+          assert.equal((await fetch(base + '/download?path=' + encodeURIComponent(outside))).status, 400);
+        } finally { await new Promise(resolve => server.close(resolve)); }
+      });
+    }
+  }
+});
 
 test('paged projects fetch one upstream page and restore the selected session separately', async () => {
   const bus = new EventEmitter();
