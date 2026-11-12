@@ -1,11 +1,11 @@
 .markdown-table { max-width: 100%; overflow-x: auto; margin: 16px 0; }
 .markdown .markdown-table table { display: table; border-collapse: collapse; width: 100%; line-height: 1.65; }
-.markdown th, .markdown td { padding: 9px 12px; border: 1px solid #414141; min-width: 90px; }
-.markdown th { background: #303030; font-weight: 600; }
-.markdown tr:nth-child(even) { background: #232323; }
+.markdown th, .markdown td { padding: 9px 12px; border:1px solid var(--border-strong,#414141); min-width: 90px; }
+.markdown th { background:var(--surface-raised,#303030); font-weight: 600; }
+.markdown tr:nth-child(even) { background:var(--surface,#232323); }
 .markdown .contains-task-list { list-style: none; padding-left: 6px; }
-.markdown input[type="checkbox"] { display: inline-block; width: auto; margin: 0 8px 0 0; padding: 0; vertical-align: middle; accent-color: #91c9a1; }
-.markdown pre code.hljs { padding: 0; background: transparent; }
+.markdown input[type="checkbox"] { display: inline-block; width: auto; margin: 0 8px 0 0; padding: 0; vertical-align: middle; accent-color:var(--success,#91c9a1); }
+.markdown pre code.hljs { padding: 0; background:transparent; }
 .markdown .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
-.markdown .footnotes { border-top: 1px solid #414141; margin-top: 24px; font-size: 12px; color: #aaa; }
-.markdown del { color: #999; }
+.markdown .footnotes { border-top:1px solid var(--border-strong,#414141); margin-top: 24px; font-size: 12px; color:var(--text-secondary,#aaa); }
+.markdown del { color:var(--text-muted,#999); }

@@ -1,8 +1,8 @@
-.message-time{display:inline-block;font-size:10px;line-height:1.5;color:#969696;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap;cursor:default}
-.user-message .message-time{display:block;text-align:right;margin-top:6px;color:#aaa}
+.message-time{display:inline-block;font-size:10px;line-height:1.5;color:var(--text-muted,#969696);font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap;cursor:default}
+.user-message .message-time{display:block;text-align:right;margin-top:6px;color:var(--text-secondary,#aaa)}
 .agent-label .message-time{margin-left:auto}
-.time-separator{display:flex;justify-content:center;margin:22px 0;color:#929292;font-size:11px;font-variant-numeric:tabular-nums}
-.turn-time{margin:12px 0 28px;padding-top:10px;border-top:1px solid #333;color:#999;font-size:11px;font-variant-numeric:tabular-nums}
-.turn-time.active{border:0;margin:12px 0;color:#bbb}
+.time-separator{display:flex;justify-content:center;margin:22px 0;color:var(--text-muted,#929292);font-size:11px;font-variant-numeric:tabular-nums}
+.turn-time{margin:12px 0 28px;padding-top:10px;border-top:1px solid var(--border,#333);color:var(--text-muted,#999);font-size:11px;font-variant-numeric:tabular-nums}
+.turn-time.active{border:0;margin:12px 0;color:var(--text-secondary,#bbb)}
 .working .turn-time{margin:0;padding:0}
-.tool-item .tool-duration{color:#929292;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tool-item .tool-duration{color:var(--text-muted,#929292);white-space:nowrap;font-variant-numeric:tabular-nums}
