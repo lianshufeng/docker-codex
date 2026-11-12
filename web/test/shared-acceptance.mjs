@@ -83,6 +83,7 @@ try {
   const started = await api(a, s + '/messages', 'POST', { text: '请执行等待20秒的命令，然后回复等待完成。' });
   await api(b, s + '/messages', 'POST', { text: '重复请求' }, 409);
   await api(b, s, 'DELETE', undefined, 409);
+  await api(b, p, 'DELETE', undefined, 409);
   await api(b, `${p}/files?path=external.txt`, 'DELETE', undefined, 409);
   assert.equal((await api(a, '/status')).maxConcurrentTasks, null);
   const second = `${p}/sessions/${extra.session.id}`;
@@ -97,10 +98,20 @@ try {
   assert.ok(!entries.some(entry => entry.fileName === '.web-project.json'));
   await api(b, `${p}/files?path=external.txt`, 'DELETE');
   await api(a, `${p}/download?path=external.txt`, 'GET', undefined, 404);
-  await api(a, p, 'DELETE', undefined, 409);
   await api(b, s, 'DELETE');
+  await bus.rpc('fs/writeFile', { path: `${cwd}/保留.txt`, dataBase64: Buffer.from('项目删除保留文件').toString('base64') });
+  await api({}, p, 'DELETE', undefined, 401);
+  const deleted = await api(a, p, 'DELETE');
+  assert.ok(deleted.deleted.includes(seed.id));
+  assert.ok(deleted.deleted.includes(extra.session.id));
+  for (const archived of [false, true]) {
+    const remaining = await bus.rpc('thread/list', { cwd, archived });
+    assert.equal(remaining.data.length, 0);
+  }
+  assert.ok(!(await api(b, '/projects')).projects.some(project => project.id === projectId(cwd)));
+  assert.equal(Buffer.from((await bus.rpc('fs/readFile', { path: `${cwd}/保留.txt` })).dataBase64, 'base64').toString(), '项目删除保留文件');
   assert.ok((await bus.rpc('fs/getMetadata', { path: cwd })).isDirectory);
-  pass('共享文件删除、线程删除保留目录、无项目元信息生成');
+  pass('未登录拒绝删除；项目批量永久删除含归档会话，双账号列表同步且目录文件保留');
   report.passed = true;
 } catch (error) { report.passed = false; report.error = error.message; console.error(error); process.exitCode = 1; }
 finally {

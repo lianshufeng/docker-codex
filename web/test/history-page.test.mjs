@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { historyPage } from '../server/history-page.mjs';
+import { compactItem, historyPage } from '../server/history-page.mjs';
 
 test('item history uses bounded descending pages and defers large command output', async () => {
   const calls = [];
@@ -43,4 +43,20 @@ test('history failures do not silently fall back or accept malformed cursors', a
   await assert.rejects(historyPage(bus, 'thread'), /connection lost/);
   assert.deepEqual(calls, ['thread/items/list']);
   await assert.rejects(historyPage(bus, 'thread', 'invalid'), /游标无效/);
+});
+
+test('history preserves recorded item lifecycle times without fabricating missing timestamps', async () => {
+  const bus = { rpc: async () => ({ data: [
+    { turnId: 'turn', startedAtMs: 1730000000123, completedAtMs: 1730000000456,
+      item: { id: 'user', type: 'userMessage', startedAtMs: null } },
+    { turnId: 'turn', item: { id: 'old', type: 'agentMessage' } },
+  ] }) };
+  const { items } = await historyPage(bus, 'thread');
+  assert.equal(items[0].startedAtMs, 1730000000123);
+  assert.equal(items[0].completedAtMs, 1730000000456);
+  assert.equal(items[1].startedAtMs, undefined);
+  assert.equal(items[1].completedAtMs, undefined);
+  const legacy = compactItem({ id: 'legacy', startedAtMs: 1000 }, 'turn');
+  assert.equal(legacy.startedAtMs, 1000);
+  assert.equal(compactItem({ startedAtMs: NaN, completedAtMs: -1 }, 'turn').completedAtMs, undefined);
 });

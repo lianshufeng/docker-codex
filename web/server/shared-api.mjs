@@ -26,11 +26,11 @@ export function sharedApi(bus, config, broadcast) {
     return typeof value === 'function' ? value.bind(target) : value;
   } });
   router.use((req, res, next) => context.run({ runId: bus.state.runId }, next));
-  const reservations = new Map(), approvals = new Map(), submitted = new Map();
+  const reservations = new Map(), approvals = new Map(), submitted = new Map(), deletingProjects = new Set();
   const listedSession = t => ({ ...sessionOf(t), running: t.status?.type === 'active' || reservations.has(t.id) });
   const catalogPage = projectCatalog(bus, listedSession);
   const capabilities = () => ({ steer: bus.supports('turn/steer'), plan: bus.supports('config/read') && bus.supports('turn/start'),
-    renameThread: bus.supports('thread/name/set'), archiveThread: bus.supports('thread/archive'),
+    renameThread: bus.supports('thread/name/set'), archiveThread: bus.supports('thread/archive'), deleteProject: bus.supports('thread/delete'),
     files: bus.supports('fs/readDirectory') && bus.supports('fs/readFile'), shared: true,
     fileTransfer: transport?.limits(), maxFileBytes: transport?.limits() ? transport.limits().maxFileBytes : null });
   const status = () => ({ connected: bus.ready(), state: bus.state.state, runId: bus.state.runId,
@@ -69,6 +69,12 @@ export function sharedApi(bus, config, broadcast) {
     requireValue(projectId(decoded) === req.params.pid, '目录标识无效');
     return absolute(decoded);
   }
+  router.use('/projects/:pid', (req, res, next) => {
+    if (!['GET', 'HEAD'].includes(req.method) && deletingProjects.has(req.params.pid)) {
+      return next(new HttpError(409, '项目正在删除，请稍后重试'));
+    }
+    next();
+  });
   async function thread(req) {
     const result = await bus.rpc('thread/read', { threadId: req.params.sid });
     if (projectId(result.thread.cwd) !== req.params.pid) throw new HttpError(404, '会话不在此目录');
@@ -176,6 +182,10 @@ export function sharedApi(bus, config, broadcast) {
     res.json({ sessions });
   });
   async function create(cwd, name) {
+    if (deletingProjects.has(projectId(cwd))) throw new HttpError(409, '项目正在删除，请稍后重试');
+    return locks.run(`project:${projectId(cwd)}`, () => createThread(cwd, name));
+  }
+  async function createThread(cwd, name) {
     const requestedName = name ? displayName(name) : undefined;
     if (requestedName && !bus.supports('thread/name/set')) throw new HttpError(409, '当前连接尚未支持修改会话名称，请更新桌面连接服务，或不填写名称创建会话');
     const { thread: created } = await bus.rpc('thread/start', { cwd, sandbox: config.sandbox, approvalPolicy: config.approvalPolicy });
@@ -193,9 +203,13 @@ export function sharedApi(bus, config, broadcast) {
   }
   router.post('/projects', async (req, res) => {
     let cwd;
-    if (req.body.path) cwd = absolute(req.body.path);
+    if (req.body.path) {
+      cwd = absolute(req.body.path);
+      if (deletingProjects.has(projectId(cwd))) throw new HttpError(409, '项目正在删除，请稍后重试');
+    }
     else {
       cwd = linuxProjectPath(req.body.name);
+      if (deletingProjects.has(projectId(cwd))) throw new HttpError(409, '项目正在删除，请稍后重试');
       const options = await projectOptions(bus);
       requireValue(options.platform === 'linux', '请选择项目文件夹');
       await locks.run(cwd, async () => {
@@ -227,7 +241,83 @@ export function sharedApi(bus, config, broadcast) {
     await bus.rpc('fs/createDirectory', { path: cwd, recursive: false }); res.status(201).json({ path: cwd });
   });
   router.patch('/projects/:pid', (req, res) => { throw new HttpError(409, '项目按目录分组，请直接修改会话名称'); });
-  router.delete('/projects/:pid', (req, res) => { throw new HttpError(409, '请逐个删除会话，目录与文件单独管理'); });
+  router.delete('/projects/:pid', async (req, res) => {
+    const cwd = root(req), pid = req.params.pid;
+    if (!bus.supports('thread/delete')) throw new HttpError(409, '执行端不支持永久删除会话，请更新连接服务');
+    await locks.run(`project:${pid}`, async () => {
+      deletingProjects.add(pid);
+      const removed = new Set();
+      try {
+        const candidates = new Map();
+        // Include archived sessions and all source kinds, not just the visible page.
+        const sourceKinds = ['cli', 'vscode', 'appServer', 'exec', 'unknown', 'subAgent', 'subAgentReview', 'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther'];
+        // Windows project IDs are case-insensitive; upstream cwd filters are exact.
+        const scope = /^[a-z]:/i.test(cwd) ? {} : { cwd };
+        for (const archived of [false, true]) {
+          for (const t of await listThreads(bus, { ...scope, archived, sourceKinds })) {
+            if (t.cwd && projectId(t.cwd) === pid) candidates.set(t.id, t);
+          }
+        }
+        if (bus.supports('thread/loaded/list')) {
+          const cursors = new Set();
+          let cursor;
+          do {
+            const page = await bus.rpc('thread/loaded/list', cursor ? { cursor } : {});
+            for (const id of page.data) {
+              if (candidates.has(id)) continue;
+              try {
+                const { thread: t } = await bus.rpc('thread/read', { threadId: id });
+                if (t.cwd && projectId(t.cwd) === pid) candidates.set(t.id, t);
+              } catch (error) { if (!/not found|not loaded/i.test(error.message)) throw error; }
+            }
+            cursor = page.nextCursor;
+            if (cursor && cursors.has(cursor)) throw new HttpError(502, '执行端重复返回同一个分页游标');
+            cursors.add(cursor);
+          } while (cursor);
+        }
+        // thread/delete also deletes descendants. Refuse cross-project cascades.
+        const descendants = new Map(), children = new Set();
+        for (const id of candidates.keys()) {
+          const nested = [];
+          for (const archived of [false, true]) {
+            nested.push(...await listThreads(bus, { ancestorThreadId: id, archived, sourceKinds }));
+          }
+          for (const t of nested) {
+            if (t.id === id) throw new HttpError(502, '执行端未正确过滤派生会话，请更新连接服务');
+            if (!t.cwd || projectId(t.cwd) !== pid) throw new HttpError(409, '存在属于其他项目的派生会话，请先单独处理');
+            candidates.set(t.id, t); children.add(t.id);
+          }
+          descendants.set(id, nested.map(t => t.id));
+        }
+        const ids = [...candidates.keys()].sort();
+        const locked = index => index < ids.length ? locks.run(ids[index], () => locked(index + 1)) : erase();
+        async function erase() {
+          // Check every session before the first irreversible request.
+          for (const id of ids) {
+            const { thread: t } = await bus.rpc('thread/read', { threadId: id });
+            if (!t.cwd || projectId(t.cwd) !== pid) throw new HttpError(409, '会话所属项目已变化，请刷新后重试');
+            if (t.status?.type === 'active' || reservations.has(id)) throw new HttpError(409, '项目中有会话正在执行，请先停止任务');
+            if (t.ephemeral) throw new HttpError(409, '项目中存在临时会话，执行端不支持删除');
+          }
+          for (const id of ids.filter(id => !children.has(id))) {
+            await bus.rpc('thread/delete', { threadId: id });
+            for (const deleted of [id, ...(descendants.get(id) || [])]) {
+              removed.add(deleted);
+              broadcast(null, { type: 'projects-changed', removed: deleted });
+            }
+          }
+        }
+        await locked(0);
+        broadcast(null, { type: 'projects-changed', removedProject: pid });
+        res.json({ ok: true, deleted: [...removed] });
+      } catch (error) {
+        throw new HttpError(error.status || 502, `项目删除未完成，已删除 ${removed.size} 个会话；${error.message}。请刷新后重试`);
+      } finally {
+        deletingProjects.delete(pid);
+        broadcast(null, { type: 'projects-changed' });
+      }
+    });
+  });
   router.post('/projects/:pid/sessions', async (req, res) => {
     const created = await create(root(req), req.body.name);
     res.status(201).json({ session: sessionOf(created.thread), ...(created.warning ? { warning: created.warning } : {}) });
@@ -266,6 +356,18 @@ export function sharedApi(bus, config, broadcast) {
       const page = await historyPage(bus, t.id, cursor, { itemId: typeof req.query.output === 'string' ? req.query.output : undefined,
         turnId: typeof req.query.turn === 'string' ? req.query.turn : undefined });
       return res.json({ ...page, active: t.status?.type === 'active' || reservations.has(t.id), approvals: pending() });
+    }
+    if (req.query.view === 'timing') {
+      const params = { threadId: t.id, limit: 50, itemsView: 'notLoaded', sortDirection: 'desc', ...(cursor ? { cursor } : {}) };
+      let result;
+      try { result = await bus.rpc('thread/turns/list', params); }
+      catch (error) {
+        if (/not materialized yet|list_turns is not supported yet/i.test(error.message)) return res.json({ turns: [], nextCursor: null });
+        if (!/paginated_threads.*not supported|notLoaded|itemsView.*(?:unsupported|invalid)/i.test(error.message)) throw error;
+        result = await bus.rpc('thread/turns/list', { ...params, itemsView: 'summary' });
+      }
+      return res.json({ turns: result.data.map(({ id, status, startedAt, completedAt, durationMs }) => ({ id, status, startedAt, completedAt, durationMs })),
+        nextCursor: result.nextCursor ?? null });
     }
     const result = await turns(t.id, cursor);
     const activeTurn = result.data.find(turn => turn.status === 'inProgress');

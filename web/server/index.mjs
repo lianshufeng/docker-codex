@@ -31,7 +31,7 @@ function broadcast(uid, message) {
     if (event.method === 'item/commandExecution/outputDelta') scopedData = null;
     else if (['item/started', 'item/completed'].includes(event.method) && event.params?.item) {
       scopedData = JSON.stringify({ ...message, payload: { ...event, params: { ...event.params,
-        item: compactItem(event.params.item, event.params.turnId) } } });
+        item: compactItem(event.params.item, event.params.turnId, event.params) } } });
     } else if (activity && event.params?.turn?.items?.length) {
       scopedData = JSON.stringify({ ...message, payload: { ...event, params: { ...event.params,
         turn: { ...event.params.turn, items: [] } } } });

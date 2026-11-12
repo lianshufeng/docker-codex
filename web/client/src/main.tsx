@@ -4,6 +4,8 @@ import { ReplyImage } from './message-image';
 import { ProjectLocation, ProjectLocationValue } from './project-location';
 import { ElicitationForm } from './elicitation-form';
 import { uploadFile } from './upload';
+import { MessageTime, TimeSeparator, TurnTime } from './conversation-time';
+import { duration, messageTime, separator, type ItemTiming, type TurnTiming } from './timing';
 import { Plus, Folder, FolderOpen, MessageSquare, LoaderCircle, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Archive, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, File, FileText } from 'lucide-react';
 import './style.css';
 import './images.css';
@@ -12,7 +14,7 @@ import './chat-scroll.css';
 type User = { id: string; username: string };
 type Session = { id: string; threadId: string; name: string; createdAt: string; updatedAt?: string; running?: boolean };
 type Project = { id: string; name: string; cwd: string; sessions: Session[]; deleting?: boolean };
-type Item = { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[]; turnId?: string; outputDeferred?: boolean };
+type Item = ItemTiming & { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[]; turnId?: string; outputDeferred?: boolean };
 type Attachment = { data: string; name: string; size: number; image: boolean; transferId?: string };
 type Dialog = { type: string; title: string; value?: string; project?: Project; session?: Session; file?: any; relative?: string };
 async function api(url: string, options: RequestInit = {}) {
@@ -80,6 +82,7 @@ function App() {
   const drawerOpen = isMobile && (sidebar || (filePanel && Boolean(pid)));
   const [status, setStatus] = useState<any>({ connected: false, state: 'connecting' });
   const [items, setItems] = useState<Item[]>([]), [running, setRunning] = useState(false), [loadingHistory, setLoadingHistory] = useState(false), [cursor, setCursor] = useState<string | null>(null);
+  const [turnTimes, setTurnTimes] = useState<{ sid: string; turns: Record<string, TurnTiming> }>({ sid: '', turns: {} });
   const [approvals, setApprovals] = useState<any[]>([]), [filePath, setFilePath] = useState(''), [files, setFiles] = useState<any[]>([]);
   const drafts = useRef(new Map<string, string>());
   const pendingSend = useRef(new Map<string, { fingerprint: string; requestId: string }>());
@@ -401,14 +404,30 @@ function App() {
           return;
         }
         if (data.type === 'projects-changed') {
+          if (data.removedProject) {
+            projectRequest.current?.abort(); catalogRequest.current?.abort(); searchRequest.current?.abort();
+            projectsVersion.current++;
+            setProjects(current => current.filter(p => p.id !== data.removedProject));
+            setSearchResults(current => current.filter(p => p.id !== data.removedProject));
+            setCatalogIds(current => current.filter(id => id !== data.removedProject));
+            if (selection.current.pid === data.removedProject) { historyVersion.current++; setPid(''); setSid(''); setFilePanel(false); }
+            void loadProjectCatalog();
+          }
           if (data.project) {
             setProjects(current => mergeProjects(current, [data.project]));
             return;
           }
-          if (data.removed) setProjects(current => current.flatMap(p => {
-            const sessions = p.sessions.filter(s => s.id !== data.removed);
-            return sessions.length ? [{ ...p, sessions }] : [];
-          }));
+          if (data.removed) {
+            if (selection.current.sid === data.removed) { historyVersion.current++; setSid(''); }
+            setSearchResults(current => current.flatMap(p => {
+              const sessions = p.sessions.filter(s => s.id !== data.removed);
+              return sessions.length ? [{ ...p, sessions }] : [];
+            }));
+            setProjects(current => current.flatMap(p => {
+              const sessions = p.sessions.filter(s => s.id !== data.removed);
+              return sessions.length ? [{ ...p, sessions }] : [];
+            }));
+          }
           scheduleProjects(); return;
         }
         if (data.type === 'status') {
@@ -466,6 +485,16 @@ function App() {
         if (id !== undefined || method === 'serverRequest/resolved' || method === 'turn/completed') approvalVersion.current++;
         if (id !== undefined) setApprovals(current => [...current.filter(a => String(a.id) !== String(id)), data.payload]);
         if (method === 'serverRequest/resolved') setApprovals(current => current.filter(a => String(a.id) !== String(params.requestId)));
+        if ((method === 'turn/started' || method === 'turn/completed') && params.turn) {
+          const { id, status, startedAt, completedAt, durationMs } = params.turn;
+          setTurnTimes(current => {
+            const turns = current.sid === data.sessionId ? current.turns : {}, previous = turns[id];
+            return { sid: data.sessionId, turns: { ...turns,
+              [id]: { id, status, startedAt: startedAt ?? previous?.startedAt,
+                completedAt: completedAt ?? previous?.completedAt, durationMs: durationMs ?? previous?.durationMs },
+            } };
+          });
+        }
         if (method === 'turn/started') setRunning(true);
         if (method === 'turn/completed') {
           flushDeltas();
@@ -478,8 +507,11 @@ function App() {
         if (method === 'error' && params.willRetry !== true) setError(params.error?.message || params.message || '任务发生错误');
         if ((method === 'item/started' || method === 'item/completed') && params.item) {
           flushDeltas();
-          const item = { ...params.item, turnId: params.turnId };
-          setItems(current => { const index = current.findIndex(i => i.id === item.id); if (index < 0) return [...current, item]; return current.map((i, n) => n === index ? item : i); });
+          const item = { ...params.item, turnId: params.turnId,
+            startedAtMs: params.startedAtMs ?? params.item.startedAtMs,
+            completedAtMs: params.completedAtMs ?? params.item.completedAtMs };
+          setItems(current => { const index = current.findIndex(i => i.id === item.id); if (index < 0) return [...current, item]; return current.map((i, n) => n === index
+            ? { ...i, ...item, startedAtMs: item.startedAtMs ?? i.startedAtMs, completedAtMs: item.completedAtMs ?? i.completedAtMs } : i); });
         }
         if (method === 'item/agentMessage/delta') {
           deltas.set(params.itemId, { turnId: params.turnId, text: (deltas.get(params.itemId)?.text || '') + params.delta });
@@ -541,6 +573,34 @@ function App() {
     if (sid) void loadHistory();
     else setLoadingHistory(false);
   }, [pid, sid]);
+  const timingIds = [...new Set(items.map(item => item.turnId).filter(Boolean))].join(',');
+  useEffect(() => {
+    if (!sid || !socketConnected || !timingIds) return;
+    const request = new AbortController(), selected = { pid, sid }, liveAt = liveVersion.current;
+    void (async () => {
+      const known = turnTimes.sid === sid ? turnTimes.turns : {};
+      const pending = new Set(timingIds.split(',').filter(id => !known[id] || known[id].status === 'inProgress')), visited = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const query = new URLSearchParams({ view: 'timing' });
+        if (cursor) query.set('cursor', cursor);
+        const result = await api(sessionUrl(selected.pid, selected.sid) + '/history?' + query, { signal: request.signal });
+        if (request.signal.aborted || selection.current.sid !== selected.sid) return;
+        setTurnTimes(current => {
+          const turns = { ...(current.sid === selected.sid ? current.turns : {}) };
+          for (const turn of result.turns as TurnTiming[]) {
+            if (liveVersion.current === liveAt || !turns[turn.id]) turns[turn.id] = turn;
+          }
+          return { sid: selected.sid, turns };
+        });
+        for (const turn of result.turns) pending.delete(turn.id);
+        cursor = result.nextCursor || undefined;
+        if (cursor && visited.has(cursor)) throw new Error('执行端重复返回同一个轮次游标');
+        if (cursor) visited.add(cursor);
+      } while (cursor && pending.size);
+    })().catch(() => { /* 旧执行端不支持时间元数据时保留正文，不补造时间。 */ });
+    return () => request.abort();
+  }, [pid, sid, timingIds, socketConnected, running]);
   useEffect(() => { if (filePanel && pid) refreshFiles(); }, [filePanel, pid, filePath, running]);
   function onChatScroll() {
     const viewport = scroll.current;
@@ -562,7 +622,7 @@ function App() {
       prependOffset.current = null;
     } else if (followLatest.current) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
     else if (items.length || approvals.length) setNewMessages(true);
-  }, [items.length, items.at(-1)?.text, approvals.length, running, cursor]);
+  }, [items.length, items.at(-1)?.text, approvals.length, running, cursor, turnTimes]);
   async function authenticate(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError('');
     try {
@@ -598,7 +658,16 @@ function App() {
       } else if (dialog.type === 'rename-session' && p && dialog.session) {
         await api(sessionUrl(p.id, dialog.session.id), { method: 'PATCH', body: JSON.stringify({ name: dialogValue }) }); await refreshProjects();
       } else if (dialog.type === 'delete-project' && p) {
-        await api(`/projects/${p.id}`, { method: 'DELETE' }); await refreshProjects(); if (pid === p.id) { setPid(''); setSid(''); }
+        await api(`/projects/${p.id}`, { method: 'DELETE' });
+        projectRequest.current?.abort(); catalogRequest.current?.abort();
+        projectsVersion.current++;
+        setProjects(current => current.filter(project => project.id !== p.id));
+        setSearchResults(current => current.filter(project => project.id !== p.id));
+        setCatalogIds(current => current.filter(id => id !== p.id));
+        setCatalogCursor(undefined);
+        void loadProjectCatalog();
+        if (selection.current.pid === p.id) { historyVersion.current++; setPid(''); setSid(''); setFilePanel(false); }
+        void refreshProjects().catch(e => setError(e.message));
       } else if (dialog.type === 'archive-session' && p && dialog.session) {
         const archivedId = dialog.session.id;
         await post(sessionUrl(p.id, archivedId) + '/archive');
@@ -683,6 +752,7 @@ function App() {
   const connected = status.connected && socketConnected;
   const canSteer = status.capabilities?.steer !== false;
   const canArchiveThread = status.capabilities?.archiveThread !== false;
+  const canDeleteProject = status.capabilities?.deleteProject === true;
   const canRenameThread = status.capabilities?.renameThread !== false;
   const canFiles = status.capabilities?.files !== false;
   const query = sessionQuery.trim().toLocaleLowerCase();
@@ -729,14 +799,14 @@ function App() {
       <div className="recent-sessions">{recentSessions.slice(0, recentLimit).map(({ project: p, session: s }) => <button key={s.id} className={'recent-session '+(sid===s.id?'active':'')} onClick={() => selectResult(p,s)} title={s.name+' · '+p.cwd}>{sessionIndicator(s,15)}<span><strong>{s.name}</strong><small>{p.name}</small></span></button>)}
       {recentSessions.length===0 && <p className="sidebar-empty">{query ? (matchingProjects.length ? '匹配的项目下暂无会话' : '没有找到匹配的会话') : '新建会话后会显示在这里'}</p>}
       {(recentSessions.length>recentLimit || sessionCursor) && <button className="load-more-sessions" disabled={pageLoading} onClick={moreSessions}>查看更多会话 <ChevronDown size={13}/></button>}</div>
-      {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled title="请逐个归档会话，目录单独管理" onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}>{sessionIndicator(s,14)}<span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}
+      {(!query || matchingProjects.length > 0) && <div className="section-label project-section-label">项目 <span>{matchingProjects.length}</span></div>}{!query && projects.length === 0 && <p className="sidebar-empty">创建一个项目<br/>开始整理你的想法</p>}{matchingProjects.map(p => <div className="project-group" key={p.id}><div className={'project-row '+(pid===p.id?'selected-project':'')}><button className="project-label" title={p.cwd} onClick={() => { if (query) { setPid(p.id); setSid(p.sessions[0]?.id || ''); setCollapsed(v => ({...v,[p.id]:false})); setSessionQuery(''); setRecentLimit(8); return; } if (!isMobile || pid !== p.id) { setPid(p.id); setSid(p.sessions[0]?.id || ''); } setCollapsed(v => ({...v,[p.id]:!(v[p.id] ?? (pid!==p.id))})); }}>{(collapsed[p.id] ?? (pid!==p.id)) ? <ChevronRight size={13}/> : <ChevronDown size={13}/>}<Folder size={16}/><span>{p.name}</span></button><div className="row-actions"><button title="创建会话" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={14}/></button><button disabled title="目录分组名称由执行端路径决定" onClick={() => openDialog({type:'rename-project',title:'重命名项目',value:p.name,project:p})}><Pencil size={13}/></button><button disabled={busy||!connected||!canDeleteProject} title={canDeleteProject?"删除项目及全部会话":"更新执行端连接服务后可删除项目"} onClick={() => openDialog({type:'delete-project',title:'删除项目',project:p})}><Trash2 size={13}/></button></div></div>{!query && !(collapsed[p.id] ?? (pid!==p.id)) && <div className="sessions">{p.sessions.map(s => <div className={'session-row '+(sid===s.id?'active':'')} key={s.id}><button onClick={() => selectSession(p.id,s.id)}>{sessionIndicator(s,14)}<span>{s.name}</span></button><div className="row-actions"><button title={canRenameThread?"重命名会话":"更新桌面连接服务后可修改名称"} disabled={!canRenameThread} onClick={() => openDialog({type:'rename-session',title:'重命名会话',value:s.name,project:p,session:s})}><Pencil size={12}/></button><button title="归档会话" disabled={!canArchiveThread} onClick={() => openDialog({type:'archive-session',title:'归档会话',project:p,session:s})}><Archive size={12}/></button></div></div>)}<button className="add-session" onClick={() => openDialog({type:'session',title:'创建会话',project:p})}><Plus size={13}/> 新会话</button></div>}</div>)}
       {query ? searchCursor && <button className="load-more-sessions" disabled={searchLoading} onClick={loadNextSessionPage}>加载更多搜索结果 <ChevronDown size={13}/></button>
         : catalogCursor !== null && <button className="load-more-sessions" disabled={catalogLoading} onClick={() => void loadProjectCatalog(catalogCursor)}>{catalogLoading ? '正在加载…' : '加载更多项目'} <ChevronDown size={13}/></button>}
       </nav><div className="sidebar-bottom"><div className="connection"><span className={'dot '+(!connected?'offline':'')}/>{connected?'AI 助手 已连接':'正在等待连接'}<span className="mqtt-label">MQTT</span></div><button className="user-button" onClick={() => setMenu(!menu)}><span className="avatar">{user.username[0].toUpperCase()}</span><span>{user.username}<small>共享工作空间</small></span><Settings2 size={16}/></button>{menu && <div className="user-menu"><button onClick={() => openDialog({type:'password',title:'修改密码'})}><KeyRound size={16}/> 修改密码</button><button onClick={async () => { await post('/auth/logout'); setUser(null); setItems([]); }}><LogOut size={16}/> 退出登录</button></div>}</div></aside>}
     <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project||!canFiles} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     {!error && retry && retry.sessionId === sid && <div role="status" className="error-banner"><AlertCircle size={16}/><span>{retry.message}</span><button onClick={() => setRetry(null)} aria-label="关闭重连提示"><X size={15}/></button></div>}
-    <div className="chat-region"><div className="chat-scroll" ref={scroll} onScroll={onChatScroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}{items.map(item => <ChatItem key={item.id} item={item} projectId={pid} threadId={sid} lowData={isMobile}/>)}{running && <div className="working"><span className="pulse"/> AI 助手 正在工作<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
+    <div className="chat-region"><div className="chat-scroll" ref={scroll} onScroll={onChatScroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}<TimedItems items={items} projectId={pid} threadId={sid} lowData={isMobile} turns={turnTimes.sid === sid ? turnTimes.turns : {}} connected={connected}/>{running && <div className="working"><span className="pulse"/>{turnTimes.sid === sid && Object.values(turnTimes.turns).some(turn => turn.status === 'inProgress') ? Object.values(turnTimes.turns).filter(turn => turn.status === 'inProgress').slice(-1).map(turn => <TurnTime key={turn.id} turn={turn} connected={connected}/>) : ' AI 助手 正在工作'}<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
       await post(sessionUrl()+'/approval', {requestId:a.id, ...answer});
       if (selection.current.sid === sid) setApprovals(current => current.filter(request => request !== a));
     }}/> : a.method === "item/tool/requestUserInput" ? <UserInputRequest key={JSON.stringify([sid, a.id])} questions={a.params.questions} onSubmit={async answers => {
@@ -748,7 +818,7 @@ function App() {
     {images.length > 0 && <div className="image-attachments">{images.map((file,index) => <div className="image-attachment" key={index} title={`${file.name} · ${formatBytes(file.size)}`}>{file.image ? <img src={file.data} alt={`待发送图片 ${index+1}`}/> : <div className="file-attachment"><FileText size={22}/><span>{file.name}<small>{formatBytes(file.size)}</small></span></div>}<button type="button" aria-label={`移除${file.image ? '图片' : '附件'} ${index+1}`} disabled={busy} onClick={() => setImages(current => current.filter((_,i) => i !== index))}><X size={14}/></button></div>)}</div>}
     <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected&&(!running||canSteer))send(e, message, () => setMessage(''), running)}}}/><div className="composer-bottom"><span>{status.capabilities?.plan && session ? <button type="button" className="mode-button" disabled={running || busy} aria-pressed={planMode === true} onClick={() => setPlanMode(value => !value)}>{planMode ? '计划模式' : '普通模式'}</button> : <><span className="dot"/> AI 助手</>}</span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（支持分块上传和断点续传）" aria-label="添加文件" disabled={!session||busy||readingFiles||!canFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?(canSteer?'追加到当前任务':'等待当前任务完成'):'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles||(running&&!canSteer)}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>所有登录用户共享当前执行端</span></div></div>}</ComposerDraft></main>
     {filePanel && project && <aside className="file-panel" aria-label="项目文件" ref={isMobile ? drawer : undefined}><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<File size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title={file.directory?'删除文件夹':'删除文件'} disabled={busy||running} aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:file.directory?'删除文件夹':'删除文件',project,file,relative})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
-    {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type==='archive-session' ? <p className="delete-warning">确定归档「{dialog.session?.name}」？会话将从共享列表移除，历史、目录和文件会保留。</p> : dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'目录分组由执行端会话决定，请逐个归档会话。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}{dialog.type==='project' ? <ProjectLocation request={api} onChange={setProjectLocation}/> : dialog.type==='session'&&!canRenameThread ? <p className="delete-warning">将在当前项目中创建新会话。当前桌面连接服务尚未支持自定义名称，更新后可修改名称。</p> : <label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:undefined} autoComplete={dialog.type==='password'?'new-password':'off'}/></label>}</>}{dialog.type==='project' && notice && <div className="notice">{notice}</div>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy||(dialog.type==='project'&&!projectLocation)}>{busy?'正在处理…':dialog.type==='archive-session'?'确认归档':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
+    {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type==='archive-session' ? <p className="delete-warning">确定归档「{dialog.session?.name}」？会话将从共享列表移除，历史、目录和文件会保留。</p> : dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'将永久删除该项目下全部会话（含已归档会话及派生子会话），所有登录用户都会受到影响，历史无法恢复。目录和文件保留。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}{dialog.type==='project' ? <ProjectLocation request={api} onChange={setProjectLocation}/> : dialog.type==='session'&&!canRenameThread ? <p className="delete-warning">将在当前项目中创建新会话。当前桌面连接服务尚未支持自定义名称，更新后可修改名称。</p> : <label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:undefined} autoComplete={dialog.type==='password'?'new-password':'off'}/></label>}</>}{dialog.type==='project' && notice && <div className="notice">{notice}</div>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy||(dialog.type==='project'&&!projectLocation)}>{busy?'正在处理…':dialog.type==='archive-session'?'确认归档':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
   </div>;
 }
 function ComposerDraft({ drafts, sessionId, children }: {
@@ -835,7 +905,7 @@ function MessageFile({name, relative, projectId}:{name:string; relative:string; 
   }
   return <span className="message-file"><File size={16}/><a href={url} onClick={download}>{name}</a>{error && <small role="alert">{error}</small>}</span>;
 }
-function UserMessage({content, projectId}:{content:any[]; projectId:string}) {
+function UserMessage({content, projectId, time}:{content:any[]; projectId:string; time?:number}) {
   const text = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
   return <div className="user-message"><div><MessageImages content={content} projectId={projectId}/>{text.split('\n').map((line:string, index:number) => {
     if (line.startsWith('附件：')) {
@@ -845,7 +915,7 @@ function UserMessage({content, projectId}:{content:any[]; projectId:string}) {
       } catch { /* 普通消息中的同名文本按原样显示。 */ }
     }
     return <React.Fragment key={index}>{line}{'\n'}</React.Fragment>;
-  })}</div></div>;
+  })}<MessageTime value={time}/></div></div>;
 }
 function DeferredOutput({ item, projectId, threadId }: { item: Item; projectId: string; threadId: string }) {
   const [output, setOutput] = useState<string | null>(null), [loading, setLoading] = useState(false);
@@ -866,12 +936,27 @@ function DeferredOutput({ item, projectId, threadId }: { item: Item; projectId: 
   </div> : <pre className="tool-output">{output}</pre>;
 }
 
+function TimedItems({ items, turns, connected, ...props }: { items: Item[]; turns: Record<string, TurnTiming>; connected: boolean; projectId: string; threadId: string; lowData: boolean }) {
+  let previous: number | undefined;
+  const last = new Map(items.map((item, i) => [item.turnId, i]));
+  return <>{items.map((item, i) => {
+    const time = ['userMessage', 'agentMessage'].includes(item.type) ? messageTime(item) : undefined;
+    const divide = time !== undefined && separator(time, previous);
+    if (time !== undefined) previous = time;
+    const turn = item.turnId ? turns[item.turnId] : undefined;
+    return <React.Fragment key={item.id}>
+      {divide && <TimeSeparator value={time!}/>}
+      <ChatItem item={item} {...props}/>
+      {turn && turn.status !== 'inProgress' && last.get(item.turnId) === i && <TurnTime turn={turn} connected={connected}/>}
+    </React.Fragment>;
+  })}</>;
+}
 const ChatItem = memo(function ChatItem({item, projectId, threadId, lowData}:{item:Item; projectId:string; threadId:string; lowData:boolean}) {
   if(item.type==='reasoning')return null;
-  if(item.type==='userMessage')return <UserMessage content={item.content || []} projectId={projectId}/>;
-  if(item.type==='agentMessage')return <article className="agent-message"><div className="agent-label"><Logo small/><span>AI 助手</span></div><div className="markdown"><Suspense fallback={<div className="plain-reply">{item.text}</div>}><ReplyMarkdown text={item.text || ''} projectId={projectId} lowData={lowData}/></Suspense></div></article>;
+  if(item.type==='userMessage')return <UserMessage content={item.content || []} projectId={projectId} time={messageTime(item)}/>;
+  if(item.type==='agentMessage')return <article className="agent-message"><div className="agent-label"><Logo small/><span>AI 助手</span><MessageTime value={messageTime(item)}/></div><div className="markdown"><Suspense fallback={<div className="plain-reply">{item.text}</div>}><ReplyMarkdown text={item.text || ''} projectId={projectId} lowData={lowData}/></Suspense></div></article>;
   if(item.type==='imageView')return <Suspense fallback={<span>正在加载图片…</span>}><ReturnedImage value={(item as Item & {path:string}).path} projectId={projectId} lowData={lowData}/></Suspense>;
-  if(item.type==='commandExecution')return <details className="tool-item"><summary><Terminal size={14}/><span>{item.status==='inProgress'?'正在执行命令':'执行命令'}</span><small>{item.status==='completed'?'完成':item.status==='inProgress'?'运行中':item.status}</small><ChevronDown size={13}/></summary><pre>{item.command}</pre>{item.outputDeferred ? <DeferredOutput item={item} projectId={projectId} threadId={threadId}/> : item.aggregatedOutput && <pre className="tool-output">{item.aggregatedOutput}</pre>}</details>;
+  if(item.type==='commandExecution')return <details className="tool-item"><summary><Terminal size={14}/><span>{item.status==='inProgress'?'正在执行命令':'执行命令'}</span><small>{item.status==='completed'?'完成':item.status==='inProgress'?'运行中':item.status}</small>{typeof item.durationMs === 'number' && Number.isFinite(item.durationMs) && item.durationMs >= 0 && <small className="tool-duration">{duration(item.durationMs,true)}</small>}<ChevronDown size={13}/></summary><pre>{item.command}</pre>{item.outputDeferred ? <DeferredOutput item={item} projectId={projectId} threadId={threadId}/> : item.aggregatedOutput && <pre className="tool-output">{item.aggregatedOutput}</pre>}</details>;
   if(item.type==='fileChange')return <details className="tool-item"><summary><FileText size={14}/><span>文件修改</span><ChevronDown size={13}/></summary><pre>{JSON.stringify(item.changes,null,2)}</pre></details>;
   return <div className="other-event"><Check size={13}/>{item.type}</div>;
 });

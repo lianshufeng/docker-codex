@@ -18,8 +18,13 @@ function decode(token) {
   throw new HttpError(400, '历史分页游标无效');
 }
 
-export function compactItem(item, turnId) {
+export function compactItem(item, turnId, timing = {}) {
   const entry = { ...item, turnId };
+  for (const key of ['startedAtMs', 'completedAtMs']) {
+    const value = timing[key] ?? item[key];
+    if (Number.isFinite(value) && value >= 0) entry[key] = value;
+    else delete entry[key];
+  }
   if (typeof entry.aggregatedOutput === 'string' && entry.aggregatedOutput.length > deferAt) {
     delete entry.aggregatedOutput;
     entry.outputDeferred = true;
@@ -39,7 +44,7 @@ export async function historyPage(bus, threadId, token, { itemId, turnId } = {})
           ...(cursor ? { cursor } : {}), ...(itemId ? { turnId } : {}) });
         const found = itemId && page.data.find(entry => entry.item.id === itemId);
         if (found) return { output: found.item.aggregatedOutput ?? '' };
-        if (!itemId) return { items: page.data.map(entry => compactItem(entry.item, entry.turnId)),
+        if (!itemId) return { items: page.data.map(entry => compactItem(entry.item, entry.turnId, entry)),
           nextCursor: page.nextCursor ? encode(mode, page.nextCursor, null) : null,
           newerCursor: mode === 'items' && page.backwardsCursor ? encode('newer', page.backwardsCursor, null) : null };
         if (visited.has(page.nextCursor)) throw new HttpError(502, '执行端重复返回同一个历史游标');
