@@ -128,6 +128,10 @@ export class DesktopBus extends EventEmitter {
       });
     });
   }
-  publish(payload) { return this.rpc('rpc/respond', { requestId: payload.id, ...Object.fromEntries(Object.entries(payload).filter(([key]) => ['result', 'error'].includes(key))) }); }
+  publish(payload) {
+    return this.rpc('rpc/respond', { requestId: payload.id,
+      ...(this.remote?.pendingRequests ? { runId: this.remote.runId } : {}),
+      ...Object.fromEntries(Object.entries(payload).filter(([key]) => ['result', 'error'].includes(key))) }, 10000);
+  }
   async close() { clearTimeout(this.discoveryTimer); this.rejectPending('服务正在停止'); await this.client.endAsync(true); }
 }

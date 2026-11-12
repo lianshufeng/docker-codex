@@ -219,7 +219,7 @@ test('interactive requests validate answers and forward the response for each pr
     assert.equal((await submit('target', { requestId: 1, answers: { color: '红色' } })).status, 400);
     assert.equal((await submit('target', { requestId: 1, answers: { color: '蓝色' } })).status, 200);
     ask(2, [color, { id: 'size', options: [{ label: '小' }], isOther: true }]);
-    assert.equal((await submit('target', { requestId: 2, answers: { color: '蓝色' } })).status, 400);
+    assert.equal((await submit('target', { requestId: 2, answers: { unexpected: '蓝色' } })).status, 400);
     const response = { requestId: 2, answers: { color: '蓝色', size: '大' } };
     const attempts = await Promise.all([submit('target', response), submit('target', response)]);
     assert.deepEqual(attempts.map(result => result.status).sort(), [200, 404]);
@@ -254,6 +254,12 @@ test('interactive requests validate answers and forward the response for each pr
     ask(9, [color]);
     bus.emit('notification', { method: 'serverRequest/resolved', params: { threadId: 'target', requestId: '9' } }, bus.state.runId);
     assert.equal((await submit('target', { requestId: 9, answers: { color: '蓝色' } })).status, 404);
+    ask(10, [color, { id: 'note', options: null, isSecret: true }]);
+    const structured = { color: { answers: ['蓝色', 'user_note: 补充'] }, note: { answers: [] } };
+    assert.equal((await submit('target', { requestId: 10, runId: 'stale', answers: structured })).status, 409);
+    assert.equal((await submit('target', { requestId: 10, runId: bus.state.runId, answers: structured })).status, 200);
+    ask(11, [color]);
+    assert.equal((await submit('target', { requestId: 11, answers: {} })).status, 200);
     assert.deepEqual(published, [
       { id: 1, result: { answers: { color: { answers: ['蓝色'] } } } },
       { id: 2, result: { answers: { color: { answers: ['蓝色'] }, size: { answers: ['大'] } } } },
@@ -262,7 +268,9 @@ test('interactive requests validate answers and forward the response for each pr
       { id: 5, result: { action: 'decline', content: null, _meta: null } },
       { id: 6, result: { action: 'accept', content: null, _meta: null } },
       { id: 7, result: { action: 'accept', content: { name: '中文' }, _meta: null } },
-      { id: 8, result: { answers: { text: { answers: ['自由输入'] } } } }
+      { id: 8, result: { answers: { text: { answers: ['自由输入'] } } } },
+      { id: 10, result: { answers: structured } },
+      { id: 11, result: { answers: {} } }
     ]);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

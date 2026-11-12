@@ -10,6 +10,7 @@ import { decodeImages, decodeFiles } from './images.mjs';
 import { absolute, projectId, projectOf, sessionOf, listThreadPage, listThreads, checkedPath, imageLocation, projectOptions, linuxProjectPath } from './app-workspace.mjs';
 import { historyPage } from './history-page.mjs';
 import { projectCatalog } from './project-catalog.mjs';
+import { normalizeAnswers, parseQuestionReply, pendingQuestions, questionKey, questionReply } from '../user-input.mjs';
 
 export function sharedApi(bus, config, broadcast) {
   const router = express.Router(), locks = new Locks(), admissions = new Locks();
@@ -26,8 +27,10 @@ export function sharedApi(bus, config, broadcast) {
     return typeof value === 'function' ? value.bind(target) : value;
   } });
   router.use((req, res, next) => context.run({ runId: bus.state.runId }, next));
-  const reservations = new Map(), approvals = new Map(), submitted = new Map(), deletingProjects = new Set();
-  const listedSession = t => ({ ...sessionOf(t), running: t.status?.type === 'active' || reservations.has(t.id) });
+  const reservations = new Map(), approvals = new Map(), submitted = new Map(), answeredQuestions = new Map(), deletingProjects = new Set();
+  const asyncQuestions = new Map();
+  const waiting = t => Boolean(t.status?.activeFlags?.includes('waitingOnUserInput'));
+  const listedSession = t => ({ ...sessionOf(t), running: t.status?.type === 'active' || reservations.has(t.id), waiting: waiting(t) });
   const catalogPage = projectCatalog(bus, listedSession);
   const capabilities = () => ({ steer: bus.supports('turn/steer'), plan: bus.supports('config/read') && bus.supports('turn/start'),
     renameThread: bus.supports('thread/name/set'), archiveThread: bus.supports('thread/archive'), deleteProject: bus.supports('thread/delete'),
@@ -37,7 +40,7 @@ export function sharedApi(bus, config, broadcast) {
     activeTasks: reservations.size, maxConcurrentTasks: null, capabilities: capabilities() });
   let runId;
   bus.on('status', () => {
-    if (runId !== bus.state.runId || !bus.ready()) { reservations.clear(); approvals.clear(); }
+    if (runId !== bus.state.runId || !bus.ready()) { reservations.clear(); approvals.clear(); answeredQuestions.clear(); asyncQuestions.clear(); }
     runId = bus.state.runId;
     broadcast(null, { type: 'status', ...status() });
   });
@@ -51,12 +54,33 @@ export function sharedApi(bus, config, broadcast) {
       reservations.delete(id);
       for (const [key, approval] of approvals) {
         if (approval.params?.threadId !== id) continue;
-        if (approval.method === 'mcpServer/elicitation/request' && approval.params.turnId !== params.turn.id) continue;
+        if (approval.params.turnId != null && approval.params.turnId !== params.turn.id ||
+          approval.method === 'mcpServer/elicitation/request' && approval.params.turnId == null) continue;
         approvals.delete(key);
       }
     }
     if (message.id !== undefined) approvals.set(String(message.id), message);
     broadcast(null, { type: 'rpc', sessionId: id, payload: message });
+    if (message.method === 'item/completed' && (params.item?.questions?.length || params.item?.type === 'userMessage')) {
+      const questions = asyncQuestions.get(id) ?? new Set();
+      if (params.item.questions?.length) {
+        params.item.questions.forEach((question, index) => questions.add(questionKey(params.item.id, index)));
+      } else {
+        const text = params.item.content?.filter(part => part.type === 'text').map(part => part.text).join('\n');
+        const replies = parseQuestionReply(text);
+        if (replies) for (const reply of replies) questions.delete(reply.questionItemId);
+        else questions.clear();
+      }
+      if (questions.size) asyncQuestions.set(id, questions);
+      else asyncQuestions.delete(id);
+      broadcast(null, { type: 'question-activity', sessionId: id, async: Boolean(questions.size) });
+    }
+    if (['item/tool/requestUserInput', 'serverRequest/resolved', 'turn/completed'].includes(message.method) ||
+      message.method === 'thread/status/changed' && params.status?.type === 'active') {
+      const statusWaiting = params.status?.activeFlags?.includes('waitingOnUserInput');
+      const pending = [...approvals.values()].some(request => request.method === 'item/tool/requestUserInput' && request.params.threadId === id);
+      broadcast(null, { type: 'question-activity', sessionId: id, waiting: statusWaiting ?? pending });
+    }
     if (['thread/started', 'thread/name/updated', 'thread/archived', 'thread/unarchived', 'thread/deleted'].includes(message.method)) {
       const created = message.method === 'thread/started' && params.thread?.cwd;
       const project = created ? { ...projectOf(params.thread.cwd), sessions: [sessionOf(params.thread)] } : undefined;
@@ -79,6 +103,19 @@ export function sharedApi(bus, config, broadcast) {
     const result = await bus.rpc('thread/read', { threadId: req.params.sid });
     if (projectId(result.thread.cwd) !== req.params.pid) throw new HttpError(404, '会话不在此目录');
     return result.thread;
+  }
+  async function pendingForThread(t) {
+    if (bus.remote?.pendingRequests && bus.remote.runId) {
+      const snapshot = await bus.rpc('bridge/pendingRequests', { runId: bus.remote.runId, threadId: t.id }, 5000);
+      return snapshot.requests;
+    }
+    if (waiting(t) && ![...approvals.values()].some(request => request.params?.threadId === t.id)) {
+      // A running thread can replay pending requests to its attached client on resume.
+      await bus.rpc('thread/resume', { threadId: t.id, excludeTurns: true }, 5000).catch(error => {
+        if (error.status === 503) throw error;
+      });
+    }
+    return [...approvals.values()].filter(request => request.params?.threadId === t.id);
   }
   async function turns(id, cursor) {
     try { return await bus.rpc('thread/turns/list', { threadId: id, limit: 20, itemsView: 'full', sortDirection: 'desc', ...(cursor ? { cursor } : {}) }); }
@@ -351,11 +388,11 @@ export function sharedApi(bus, config, broadcast) {
   router.delete('/projects/:pid/sessions/:sid', archiveSession);
   router.get('/projects/:pid/sessions/:sid/history', async (req, res) => {
     const t = await thread(req), cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
-    const pending = () => [...approvals.values()].filter(a => a.params?.threadId === t.id);
+    const pending = () => pendingForThread(t);
     if (req.query.view === 'items') {
       const page = await historyPage(bus, t.id, cursor, { itemId: typeof req.query.output === 'string' ? req.query.output : undefined,
         turnId: typeof req.query.turn === 'string' ? req.query.turn : undefined });
-      return res.json({ ...page, active: t.status?.type === 'active' || reservations.has(t.id), approvals: pending() });
+      return res.json({ ...page, active: t.status?.type === 'active' || reservations.has(t.id), approvals: await pending() });
     }
     if (req.query.view === 'timing') {
       const params = { threadId: t.id, limit: 50, itemsView: 'notLoaded', sortDirection: 'desc', ...(cursor ? { cursor } : {}) };
@@ -375,7 +412,7 @@ export function sharedApi(bus, config, broadcast) {
     if (!running && result.data.some(turn => turn.id === reservations.get(t.id) && turn.status !== 'inProgress')) reservations.delete(t.id);
     res.json({ turns: result.data,
       nextCursor: result.nextCursor, active: running ? activeTurn?.id || reservations.get(t.id) || 'unknown' : reservations.get(t.id) || null,
-      approvals: pending(), status: t.status });
+      approvals: await pending(), status: t.status });
   });
   router.post('/projects/:pid/sessions/:sid/messages', express.json({ limit: Number.MAX_SAFE_INTEGER }), async (req, res) => {
     const requestId = req.body.requestId;
@@ -388,16 +425,41 @@ export function sharedApi(bus, config, broadcast) {
       if (submitted.size >= 2048) submitted.delete(submitted.keys().next().value);
       submitted.set(key, { result, expires: now + 15 * 60_000 });
     };
-    const text = req.body.text || '', images = decodeImages(req.body.images), files = decodeFiles(req.body.files);
+    let text = req.body.text || '';
+    const { questionId, answer } = req.body;
+    if (questionId !== undefined) {
+      requireValue(typeof questionId === 'string' && questionId && Buffer.byteLength(questionId) <= 512 &&
+        typeof answer === 'string' && answer.trim() && answer.length <= 16000, '问题标识或回答无效');
+    }
+    const images = decodeImages(req.body.images), files = decodeFiles(req.body.files);
     const attachments = req.body.attachments || [];
     requireValue(Array.isArray(attachments), '附件引用无效');
-    requireValue(typeof text === 'string' && (text.trim() || images.length || files.length || attachments.length), '请输入消息或附件');
+    requireValue(typeof text === 'string' && (questionId || text.trim() || images.length || files.length || attachments.length), '请输入消息或附件');
     await locks.run(req.params.sid, async () => {
       let t = await thread(req);
       const receipt = key && submitted.get(key);
       if (receipt && receipt.expires > Date.now()) {
         if (!receipt.result) throw new HttpError(503, '上一条消息的发送结果待确认，请查看会话历史');
         return res.json({ ...receipt.result, duplicate: true });
+      }
+      if (questionId) {
+        const answeredKey = JSON.stringify([t.id, questionId]);
+        if (answeredQuestions.get(answeredKey) > Date.now()) throw new HttpError(409, '此问题已提交，请刷新查看结果');
+        requireValue(!text && !req.body.steer && !images.length && !files.length && !attachments.length, '请单独提交问题回答');
+        const items = [];
+        const visited = new Set();
+        let cursor;
+        do {
+          if (visited.has(cursor)) throw new HttpError(502, '执行端重复返回历史游标');
+          visited.add(cursor);
+          const page = await historyPage(bus, t.id, cursor);
+          items.unshift(...page.items.slice().reverse());
+          cursor = page.items.some(item => item.type === 'userMessage' && !parseQuestionReply((item.content || [])
+            .filter(part => part.type === 'text').map(part => part.text).join('\n'))) ? null : page.nextCursor;
+        } while (cursor);
+        const question = pendingQuestions(items).find(question => question.id === questionId);
+        if (!question) throw new HttpError(409, '此问题已结束或不可回答');
+        text = questionReply(question, answer.trim());
       }
       if (!req.body.steer && (t.status?.type === 'active' || reservations.has(t.id))) throw new HttpError(409, '会话正在执行');
       if (req.body.steer && !bus.supports('turn/steer')) throw new HttpError(409, '执行端不支持追加要求');
@@ -453,13 +515,21 @@ export function sharedApi(bus, config, broadcast) {
             model, reasoning_effort: effective?.model_reasoning_effort ?? null, developer_instructions: null } };
         }
         remember(null);
+        if (questionId) {
+          const now = Date.now();
+          for (const [key, expires] of answeredQuestions) if (expires <= now) answeredQuestions.delete(key);
+          answeredQuestions.set(JSON.stringify([t.id, questionId]), now + 15 * 60_000);
+        }
         const { turn } = await bus.rpc('turn/start', { threadId: t.id, input: content, ...(collaborationMode ? { collaborationMode } : {}) });
         if (reservations.has(t.id)) reservations.set(t.id, turn.id);
         const result = { turnId: turn.id };
         remember(result);
         res.json(result);
       } catch (error) {
-        if (![503, 504].includes(error.status)) { reservations.delete(t.id); submitted.delete(key); }
+        if (![503, 504].includes(error.status)) {
+          reservations.delete(t.id); submitted.delete(key);
+          if (questionId) answeredQuestions.delete(JSON.stringify([t.id, questionId]));
+        }
         throw error;
       }
     });
@@ -471,24 +541,17 @@ export function sharedApi(bus, config, broadcast) {
     res.json({ ok: true });
   });
   router.post('/projects/:pid/sessions/:sid/approval', async (req, res) => {
-    const t = await thread(req), key = String(req.body.requestId), pending = approvals.get(key);
+    if (req.body.runId !== undefined && req.body.runId !== bus.state.runId) throw new HttpError(409, '执行端已变化，请重新查看问题');
+    const t = await thread(req), key = String(req.body.requestId);
     await locks.run(`response:${key}`, async () => {
-      if (!pending || approvals.get(key) !== pending || pending.params?.threadId !== t.id) {
+      const pending = (await pendingForThread(t)).find(request => String(request.id) === key);
+      if (!pending) {
         throw new HttpError(404, '此请求已结束');
       }
       let result;
       if (pending.method === 'item/tool/requestUserInput') {
-        const { answers } = req.body;
-        const questions = pending.params.questions;
-        requireValue(answers && typeof answers === 'object' && !Array.isArray(answers) &&
-          Object.keys(answers).length === questions.length, '请回答所有问题');
-        result = { answers: Object.fromEntries(questions.map(question => {
-          const answer = Object.hasOwn(answers, question.id) ? answers[question.id] : null;
-          requireValue(typeof answer === 'string' && answer.trim() &&
-            (!question.options?.length || question.isOther || question.options.some(option => option.label === answer)),
-          '请选择有效选项或填写答案');
-          return [question.id, { answers: [answer] }];
-        })) };
+        try { result = { answers: normalizeAnswers(pending.params.questions, req.body.answers) }; }
+        catch (error) { throw new HttpError(400, error.message); }
       } else if (pending.method === 'mcpServer/elicitation/request') {
         const { action, content } = req.body;
         requireValue(['accept', 'decline', 'cancel'].includes(action), '表单操作无效');
@@ -516,10 +579,12 @@ export function sharedApi(bus, config, broadcast) {
         result = { decision: req.body.decision };
       }
       await bus.publish({ id: pending.id, result });
-      if (approvals.get(key) === pending) {
-        approvals.delete(key);
-        broadcast(null, { type: 'rpc', sessionId: t.id,
-          payload: { method: 'serverRequest/resolved', params: { threadId: t.id, requestId: pending.id } } });
+      approvals.delete(key);
+      broadcast(null, { type: 'rpc', sessionId: t.id,
+        payload: { method: 'serverRequest/resolved', params: { threadId: t.id, requestId: pending.id } } });
+      if (pending.method === 'item/tool/requestUserInput') {
+        const waiting = [...approvals.values()].some(request => request.method === pending.method && request.params.threadId === t.id);
+        broadcast(null, { type: 'question-activity', sessionId: t.id, waiting });
       }
     });
     res.json({ ok: true });

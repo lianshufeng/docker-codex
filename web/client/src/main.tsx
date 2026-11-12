@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { ReplyImage } from './message-image';
 import { ProjectLocation, ProjectLocationValue } from './project-location';
 import { ElicitationForm } from './elicitation-form';
+import { UserInputRequest, type QuestionDraft } from './user-input';
+import { parseQuestionReply, pendingQuestions } from '../../user-input.mjs';
 import { uploadFile } from './upload';
 import { MessageTime, TimeSeparator, TurnTime } from './conversation-time';
 import { duration, messageTime, separator, type ItemTiming, type TurnTiming } from './timing';
@@ -13,7 +15,7 @@ import './images.css';
 import './chat-scroll.css';
 
 type User = { id: string; username: string };
-type Session = { id: string; threadId: string; name: string; createdAt: string; updatedAt?: string; running?: boolean };
+type Session = { id: string; threadId: string; name: string; createdAt: string; updatedAt?: string; running?: boolean; waiting?: boolean };
 type Project = { id: string; name: string; cwd: string; sessions: Session[]; deleting?: boolean };
 type Item = ItemTiming & { id: string; type: string; text?: string; content?: any[]; command?: string; aggregatedOutput?: string; status?: string; changes?: any[]; turnId?: string; outputDeferred?: boolean };
 type Attachment = { data: string; name: string; size: number; image: boolean; transferId?: string };
@@ -53,7 +55,8 @@ function mergeProjects(current: Project[], incoming: Project[]) {
   }
   return [...projects.values()];
 }
-function SessionIndicator({ running, unread, size }: { running: boolean; unread: boolean; size: number }) {
+function SessionIndicator({ running, waiting, unread, size }: { running: boolean; waiting: boolean; unread: boolean; size: number }) {
+  if (waiting) return <MessageSquare size={size} className="question-waiting" role="img" aria-label="等待回答"><title>等待回答</title></MessageSquare>;
   if (running) return <LoaderCircle size={size} className="session-spinner" role="img" aria-label="正在执行"><title>正在执行</title></LoaderCircle>;
   if (unread) return <span className="session-unread" role="img" aria-label="已结束，未查看" title="已结束，未查看"/>;
   return <MessageSquare size={size} aria-hidden="true"/>;
@@ -86,6 +89,15 @@ function App() {
   const [turnTimes, setTurnTimes] = useState<{ sid: string; turns: Record<string, TurnTiming> }>({ sid: '', turns: {} });
   const [approvals, setApprovals] = useState<any[]>([]), [filePath, setFilePath] = useState(''), [files, setFiles] = useState<any[]>([]);
   const drafts = useRef(new Map<string, string>());
+  const questionDrafts = useRef(new Map<string, QuestionDraft>());
+  const [questionActivity, setQuestionActivity] = useState(new Map<string, { waiting?: boolean; async?: boolean }>());
+  const [questionHistory, setQuestionHistory] = useState('');
+  const [, setQuestionRevision] = useState(0);
+  function questionDraft(key: string) {
+    let draft = questionDrafts.current.get(key);
+    if (!draft) { draft = { index: 0, answers: new Map() }; questionDrafts.current.set(key, draft); }
+    return draft;
+  }
   const pendingSend = useRef(new Map<string, { fingerprint: string; requestId: string }>());
   const [dialog, setDialog] = useState<Dialog | null>(null), [dialogValue, setDialogValue] = useState(''), [oldPassword, setOldPassword] = useState('');
   const [projectLocation, setProjectLocation] = useState<ProjectLocationValue | null>(null);
@@ -236,6 +248,8 @@ function App() {
   }
   function sessionIndicator(session: Session, size: number) {
     return <SessionIndicator size={size}
+      waiting={Boolean(status.connected && socketConnected && (
+        (questionActivity.get(session.id)?.waiting ?? session.waiting) || questionActivity.get(session.id)?.async))}
       running={Boolean(status.connected && socketConnected && (turnActivity.get(session.id)?.running ?? session.running))}
       unread={Boolean(unread && unread.userId === user?.id && unread.sessions.has(session.id))}/>;
   }
@@ -306,7 +320,8 @@ function App() {
       if (!older && result.newerCursor) newerCursor.current = result.newerCursor;
       hasHistory.current = true;
       if (liveVersion.current === liveAt) setRunning(Boolean(result.active));
-      if (approvalVersion.current === approvalsAt) setApprovals(result.approvals || []);
+      if (approvalVersion.current === approvalsAt && !older) setApprovals(result.approvals || []);
+      if (!older) setQuestionHistory(selected.sid);
       if (!older && !result.active && liveVersion.current === liveAt) {
         setRetry(current => current?.sessionId === selected.sid ? null : current);
       }
@@ -346,6 +361,7 @@ function App() {
     setUnread({ userId: user.id, sessions: new Set(Array.isArray(savedUnread) ? savedUnread : []) });
     setTurnActivity(new Map());
     setCatalogIds([]); setCatalogCursor(undefined); setRecentThreadIds(new Set());
+    questionDrafts.current.clear(); setQuestionHistory(''); setQuestionActivity(new Map());
     setProjects([]); setItems([]); setApprovals([]); setRetry(null); setPid(''); setSid(''); setSessionQuery(''); setRecentLimit(8);
     let disposed = false, socket: WebSocket, timer: ReturnType<typeof setTimeout>;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined, reconnects = 0, previousRun: string | undefined;
@@ -437,6 +453,7 @@ function App() {
             if (!initialListLoaded && !initialListLoading) void loadInitialProjects();
             const changed = previousRun !== undefined && previousRun !== data.runId;
             if (changed) {
+              setApprovals([]); setQuestionHistory(''); setQuestionActivity(new Map());
               setProjects([]); setCatalogIds([]); setCatalogCursor(undefined); setRecentThreadIds(new Set());
               void loadProjectCatalog();
               historyRequest.current?.abort(); historyRequest.current = null;
@@ -454,6 +471,15 @@ function App() {
         }
         if (data.type === 'subscribed') {
           if (data.threadId && data.threadId === selection.current.sid) void loadHistory(false, true);
+          return;
+        }
+        if (data.type === 'question-activity') {
+          setQuestionActivity(current => {
+            const previous = current.get(data.sessionId);
+            return new Map(current).set(data.sessionId, {
+              waiting: data.waiting ?? previous?.waiting, async: data.async ?? previous?.async,
+            });
+          });
           return;
         }
         if (data.type !== 'rpc' && data.type !== 'turn-activity') return;
@@ -485,7 +511,10 @@ function App() {
         }
         if (id !== undefined || method === 'serverRequest/resolved' || method === 'turn/completed') approvalVersion.current++;
         if (id !== undefined) setApprovals(current => [...current.filter(a => String(a.id) !== String(id)), data.payload]);
-        if (method === 'serverRequest/resolved') setApprovals(current => current.filter(a => String(a.id) !== String(params.requestId)));
+        if (method === 'serverRequest/resolved') {
+          questionDrafts.current.delete(JSON.stringify([subscribedRun, data.sessionId, params.requestId]));
+          setApprovals(current => current.filter(a => String(a.id) !== String(params.requestId)));
+        }
         if ((method === 'turn/started' || method === 'turn/completed') && params.turn) {
           const { id, status, startedAt, completedAt, durationMs } = params.turn;
           setTurnTimes(current => {
@@ -501,7 +530,8 @@ function App() {
           flushDeltas();
           setRunning(false);
           setApprovals(current => current.filter(request =>
-            request.method === 'mcpServer/elicitation/request' && request.params.turnId !== params.turn.id));
+            request.params?.turnId != null && request.params.turnId !== params.turn.id ||
+            request.method === 'mcpServer/elicitation/request' && request.params.turnId == null));
           if (params.turn.error) setError(params.turn.error.message);
           if (!hasHistory.current) void loadHistory();
         }
@@ -528,7 +558,8 @@ function App() {
       };
       socket.onclose = event => {
         if (disposed) return;
-        setSocketConnected(false);
+        setSocketConnected(false); setQuestionHistory('');
+        historyRequest.current?.abort(); historyRequest.current = null;
         if (event.code === 1008) { setUser(null); setItems([]); return; }
         timer = setTimeout(connect, Math.min(1000 * 2 ** reconnects++, 15000));
       };
@@ -568,7 +599,7 @@ function App() {
     setPlanMode(undefined);
     followLatest.current = true; prependOffset.current = null;
     setAwayFromBottom(false); setNewMessages(false);
-    historyVersion.current++; fileVersion.current++; imageVersion.current++; setImages([]); setItems([]); setCursor(null); setRunning(false); setApprovals([]); setRetry(null); setFilePath('');
+    historyVersion.current++; fileVersion.current++; imageVersion.current++; setImages([]); setItems([]); setCursor(null); setRunning(false); setApprovals([]); setQuestionHistory(''); setRetry(null); setFilePath('');
     if (user) localStorage.setItem('codex-selection-' + user.id, JSON.stringify({ pid, sid }));
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify({ type: 'subscribe', threadId: sid }));
     if (sid) void loadHistory();
@@ -751,6 +782,9 @@ function App() {
   }
   async function stop() { try { await post(sessionUrl() + '/stop'); } catch (e: any) { setError(e.message); } }
   const connected = status.connected && socketConnected;
+  const waitingForAnswer = approvals.some(request => request.method === 'item/tool/requestUserInput' && request.params.isBlocking !== false);
+  const asyncQuestions = useMemo(() => pendingQuestions(items), [items]);
+  const pendingAsync = asyncQuestions.filter(question => !questionDrafts.current.get(JSON.stringify([sid, question.id]))?.submitted);
   const canSteer = status.capabilities?.steer !== false;
   const canArchiveThread = status.capabilities?.archiveThread !== false;
   const canDeleteProject = status.capabilities?.deleteProject === true;
@@ -807,17 +841,39 @@ function App() {
     <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project||!canFiles} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     {!error && retry && retry.sessionId === sid && <div role="status" className="error-banner"><AlertCircle size={16}/><span>{retry.message}</span><button onClick={() => setRetry(null)} aria-label="关闭重连提示"><X size={15}/></button></div>}
-    <div className="chat-region"><div className="chat-scroll" ref={scroll} onScroll={onChatScroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}<TimedItems items={items} projectId={pid} threadId={sid} lowData={isMobile} turns={turnTimes.sid === sid ? turnTimes.turns : {}} connected={connected}/>{running && <div className="working"><span className="pulse"/>{turnTimes.sid === sid && Object.values(turnTimes.turns).some(turn => turn.status === 'inProgress') ? Object.values(turnTimes.turns).filter(turn => turn.status === 'inProgress').slice(-1).map(turn => <TurnTime key={turn.id} turn={turn} connected={connected}/>) : ' AI 助手 正在工作'}<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
+    <div className="chat-region"><div className="chat-scroll" ref={scroll} onScroll={onChatScroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}<TimedItems items={items} projectId={pid} threadId={sid} lowData={isMobile} turns={turnTimes.sid === sid ? turnTimes.turns : {}} connected={connected}/>{running && !waitingForAnswer && <div className="working"><span className="pulse"/>{turnTimes.sid === sid && Object.values(turnTimes.turns).some(turn => turn.status === 'inProgress') ? Object.values(turnTimes.turns).filter(turn => turn.status === 'inProgress').slice(-1).map(turn => <TurnTime key={turn.id} turn={turn} connected={connected}/>) : ' AI 助手 正在工作'}<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
       await post(sessionUrl()+'/approval', {requestId:a.id, ...answer});
       if (selection.current.sid === sid) setApprovals(current => current.filter(request => request !== a));
-    }}/> : a.method === "item/tool/requestUserInput" ? <UserInputRequest key={JSON.stringify([sid, a.id])} questions={a.params.questions} onSubmit={async answers => {
-      await post(sessionUrl()+'/approval', {requestId:a.id, answers});
-      if (selection.current.sid === sid) setApprovals(current => current.filter(request => request !== a));
-    }}/> : <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method === 'item/permissions/requestApproval' && <pre className="permission-request">{JSON.stringify(a.params.permissions, null, 2)}</pre>}{['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'].includes(a.method) ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}</div>}</div>
+    }}/> : a.method === 'item/tool/requestUserInput' ? (() => {
+      const key = JSON.stringify([status.runId, sid, a.id]);
+      return <UserInputRequest key={key} draft={questionDraft(key)} questions={a.params.questions || []}
+        blocking={a.params.isBlocking !== false} disabled={!connected || questionHistory !== sid}
+        onSubmit={async answers => {
+          await post(sessionUrl() + '/approval', { runId: status.runId, requestId: a.id, answers });
+          questionDrafts.current.delete(key);
+          if (selection.current.sid === sid) setApprovals(current => current.filter(request => request !== a));
+        }}/>;
+    })() : <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method === 'item/permissions/requestApproval' && <pre className="permission-request">{JSON.stringify(a.params.permissions, null, 2)}</pre>}{['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'].includes(a.method) ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}{pendingAsync.map(question => {
+      const key = JSON.stringify([sid, question.id]);
+      const draft = questionDraft(key);
+      return <UserInputRequest key={key} draft={draft} blocking={false} disabled={!connected || running || questionHistory !== sid}
+        questions={[{ id: question.id, header: '', question: question.title, isOther: true,
+          options: question.options.map(label => ({ label })) }]}
+        onSkip={() => { draft.submitted = true; draft.answers.clear(); setQuestionRevision(value => value + 1); }}
+        onSubmit={async answers => {
+          const answer = answers[question.id].answers[0];
+          if (draft.requestId && draft.answer !== answer) throw new Error('上一条回答结果待确认，请先刷新查看问题状态。');
+          draft.answer = answer;
+          const requestId = draft.requestId ??= Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+          try { await post(sessionUrl() + '/messages', { questionId: question.id, answer, requestId }); }
+          catch (e: any) { if (e.status && ![503, 504].includes(e.status)) draft.requestId = undefined; throw e; }
+          draft.submitted = true; draft.answers.clear(); setQuestionRevision(value => value + 1);
+        }}/>;
+    })}</div>}</div>
     {session && awayFromBottom && <button type="button" className="jump-latest" onClick={jumpToLatest} aria-label="回到最新消息" title="回到最新消息"><ChevronDown size={19}/>{newMessages && <span>有新消息</span>}</button>}</div>
     <ComposerDraft key={sid} drafts={drafts.current} sessionId={sid}>{(message, setMessage) => <div className="composer-wrap">{uploadProgress && <div className="notice" role="status">正在上传 {uploadProgress}，失败后重新选择文件可续传</div>}<form className="composer" onSubmit={e => send(e, message, () => setMessage(''), running)}>
     {images.length > 0 && <div className="image-attachments">{images.map((file,index) => <div className="image-attachment" key={index} title={`${file.name} · ${formatBytes(file.size)}`}>{file.image ? <img src={file.data} alt={`待发送图片 ${index+1}`}/> : <div className="file-attachment"><FileText size={22}/><span>{file.name}<small>{formatBytes(file.size)}</small></span></div>}<button type="button" aria-label={`移除${file.image ? '图片' : '附件'} ${index+1}`} disabled={busy} onClick={() => setImages(current => current.filter((_,i) => i !== index))}><X size={14}/></button></div>)}</div>}
-    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected&&(!running||canSteer))send(e, message, () => setMessage(''), running)}}}/><div className="composer-bottom"><span>{status.capabilities?.plan && session ? <button type="button" className="mode-button" disabled={running || busy} aria-pressed={planMode === true} onClick={() => setPlanMode(value => !value)}>{planMode ? '计划模式' : '普通模式'}</button> : <><span className="dot"/> AI 助手</>}</span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（支持分块上传和断点续传）" aria-label="添加文件" disabled={!session||busy||readingFiles||!canFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?(canSteer?'追加到当前任务':'等待当前任务完成'):'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles||(running&&!canSteer)}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>所有登录用户共享当前执行端</span></div></div>}</ComposerDraft></main>
+    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={waitingForAnswer ? '请先在问题卡片中回答' : session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy||waitingForAnswer} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected&&(!running||canSteer))send(e, message, () => setMessage(''), running)}}}/><div className="composer-bottom"><span>{status.capabilities?.plan && session ? <button type="button" className="mode-button" disabled={running || busy} aria-pressed={planMode === true} onClick={() => setPlanMode(value => !value)}>{planMode ? '计划模式' : '普通模式'}</button> : <><span className="dot"/> AI 助手</>}</span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（支持分块上传和断点续传）" aria-label="添加文件" disabled={!session||busy||readingFiles||!canFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?(canSteer?'追加到当前任务':'等待当前任务完成'):'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles||waitingForAnswer||(running&&!canSteer)}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>所有登录用户共享当前执行端</span></div></div>}</ComposerDraft></main>
     {filePanel && project && <aside className="file-panel" aria-label="项目文件" ref={isMobile ? drawer : undefined}><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<File size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title={file.directory?'删除文件夹':'删除文件'} disabled={busy||running} aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:file.directory?'删除文件夹':'删除文件',project,file,relative})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
     {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type==='archive-session' ? <p className="delete-warning">确定归档「{dialog.session?.name}」？会话将从共享列表移除，历史、目录和文件会保留。</p> : dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'将永久删除该项目下全部会话（含已归档会话及派生子会话），所有登录用户都会受到影响，历史无法恢复。目录和文件保留。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}{dialog.type==='project' ? <ProjectLocation request={api} onChange={setProjectLocation}/> : dialog.type==='session'&&!canRenameThread ? <p className="delete-warning">将在当前项目中创建新会话。当前桌面连接服务尚未支持自定义名称，更新后可修改名称。</p> : <label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:undefined} autoComplete={dialog.type==='password'?'new-password':'off'}/></label>}</>}{dialog.type==='project' && notice && <div className="notice">{notice}</div>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy||(dialog.type==='project'&&!projectLocation)}>{busy?'正在处理…':dialog.type==='archive-session'?'确认归档':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
   </div>;
@@ -833,55 +889,6 @@ function ComposerDraft({ drafts, sessionId, children }: {
     setMessage(value);
   });
 }
-type InputQuestion = { id: string; header: string; question: string; isOther: boolean; isSecret: boolean;
-  options: { label: string; description: string }[] | null };
-
-function InputQuestionField({ question, index }: { question: InputQuestion; index: number }) {
-  const [selected, setSelected] = useState('');
-  const options = question.options || [];
-  return <fieldset>
-    <legend>{question.header}</legend>
-    <label>
-      {question.question}
-      {options.length > 0 && <select required value={selected} onChange={event => setSelected(event.target.value)}>
-        <option value="" disabled>请选择</option>
-        {options.map((option, i) => <option key={i} value={i}>{option.label}{option.description ? ` — ${option.description}` : ''}</option>)}
-        {question.isOther && <option value="other">其他（自行填写）</option>}
-      </select>}
-      {(!options.length || selected === 'other') && <input name={String(index)} required
-        aria-label="填写答案" type={question.isSecret ? 'password' : 'text'} autoComplete="off"/>}
-      {selected !== '' && selected !== 'other' && <input type="hidden" name={String(index)} value={options[Number(selected)].label}/>}
-    </label>
-  </fieldset>;
-}
-
-function UserInputRequest({ questions, onSubmit }: {
-  questions: InputQuestion[];
-  onSubmit: (answers: Record<string, string>) => Promise<void>;
-}) {
-  const [busy, setBusy] = useState(false), [error, setError] = useState('');
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (busy) return;
-    const data = new FormData(event.currentTarget);
-    setBusy(true);
-    setError('');
-    try {
-      await onSubmit(Object.fromEntries(questions.map((question, i) => [question.id, String(data.get(String(i)) ?? '')])));
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return <form className="approval user-input-request" onSubmit={submit}>
-    <strong>AI 助手 等待你的回答</strong>
-    {questions.map((question, i) => <InputQuestionField key={question.id} question={question} index={i}/>)}
-    <button disabled={busy}>{busy ? '正在提交…' : '提交回答'}</button>
-    {error && <p role="alert">{error}</p>}
-  </form>;
-}
-
 function formatBytes(value:number){if(value==null)return '文件';return value<1024?`${value} B`:value<1048576?`${(value/1024).toFixed(1)} KB`:`${(value/1048576).toFixed(1)} MB`}
 function MessageImages({content,projectId}:{content:any[];projectId:string}) {
   return <div className="message-images">{content.filter(c => c.type === 'localImage' || c.type === 'image').map((image,index) => {
@@ -908,6 +915,9 @@ function MessageFile({name, relative, projectId}:{name:string; relative:string; 
 }
 function UserMessage({content, projectId, time}:{content:any[]; projectId:string; time?:number}) {
   const text = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+  const replies = parseQuestionReply(text);
+  if (replies) return <div className="user-message"><div>{replies.map((reply, i) =>
+    <p className="question-answer" key={i}><span>{reply.question}</span>{reply.answer}</p>)}<MessageTime value={time}/></div></div>;
   return <div className="user-message"><div><MessageImages content={content} projectId={projectId}/>{text.split('\n').map((line:string, index:number) => {
     if (line.startsWith('附件：')) {
       try {

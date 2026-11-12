@@ -16,7 +16,7 @@ const dedup = new Deduplicator(Infinity);
 let child, runId, ready = false, stopping = false, connected = false;
 let restartTimer, initTimer, killTimer, stopTimer;
 let queue = [], queueBytes = 0, publishing = false;
-const routes = new Map(), commandResults = new Map(), serverRequests = new Set();
+const routes = new Map(), commandResults = new Map(), serverRequests = new Map();
 const replyTopic = id => `reply/${encodeURIComponent(String(id))}`;
 function cacheReply(key, payload) {
   commandResults.set(key, { payload, expiresAt: Date.now() + maxTtlMs });
@@ -32,7 +32,7 @@ const files = fileService(client, base);
 function status(state) {
   if (!connected) return;
   client.publish(`${base}/status`, JSON.stringify({ state, runId, time: Date.now(), attached: state === 'ready',
-    writerReady: state === 'ready', protocolVersion: 1, methods: '*', maxRequestBytes: null,
+    writerReady: state === 'ready', protocolVersion: 1, methods: '*', pendingRequests: true, maxRequestBytes: null,
     fileTransfer: { version: 1, chunkBytes: 512 * 1024, maxFileBytes: null } }), { qos: 1, retain: true }, error => {
     if (error) log('status_publish_failed', { message: error.message });
   });
@@ -57,7 +57,7 @@ function output(type, payload) {
       enqueue(replyTopic(route.id), reply);
       return;
     } else if (payload.method) {
-      if (payload.id !== undefined) serverRequests.add(payload.id);
+      if (payload.id !== undefined) serverRequests.set(payload.id, payload);
       enqueue('observed/output', payload);
     } else if (payload.id !== undefined) {
       serverRequests.delete(payload.id);
@@ -157,9 +157,15 @@ client.on('message', (topic, bytes, packet) => {
       }
       const previous = commandResults.get(key);
       if (previous) { if (previous.payload) enqueue(replyTopic(id), previous.payload); return; }
-      if (request.method === 'rpc/respond' || !Object.hasOwn(request, 'method')) {
+      if (request.method === 'bridge/pendingRequests') {
+        if (request.params?.runId !== runId) throw new Error('执行端已变化，请重新查询');
+        const requests = [...serverRequests.values()].filter(message => message.params?.threadId === request.params.threadId);
+        const reply = { id, result: { runId, requests } };
+        cacheReply(key, reply); enqueue(replyTopic(id), reply);
+      } else if (request.method === 'rpc/respond' || !Object.hasOwn(request, 'method')) {
         const response = request.method === 'rpc/respond' ? request.params : request;
         const requestId = request.method === 'rpc/respond' ? response?.requestId : id;
+        if (response?.runId !== undefined && response.runId !== runId) throw new Error('执行端已变化，请重新查看问题');
         if (!response || Object.hasOwn(response, 'result') === Object.hasOwn(response, 'error') || !serverRequests.delete(requestId)) {
           throw new Error('反向请求已结束或回答格式无效');
         }
