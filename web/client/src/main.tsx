@@ -44,6 +44,7 @@ function Logo({ small = false }: { small?: boolean }) {
   return <span className={'logo ' + (small ? 'small' : '')} aria-hidden="true">⌘</span>;
 }
 const compactLayout = '(max-width: 800px)';
+const tabTitle = document.title;
 const ReplyMarkdown = lazy(() => import('./reply-images').then(module => ({ default: module.ReplyMarkdown })));
 const ReturnedImage = lazy(() => import('./reply-images').then(module => ({ default: module.ReturnedImage })));
 function mergeProjects(current: Project[], incoming: Project[]) {
@@ -585,6 +586,11 @@ function App() {
       localStorage.setItem('codex-unread-' + unread.userId, JSON.stringify([...unread.sessions]));
     }
   }, [unread, user?.id]);
+  const hasUnread = Boolean(user && unread?.userId === user.id && unread.sessions.size);
+  useEffect(() => {
+    document.title = hasUnread ? `● ${tabTitle}` : tabTitle;
+    document.getElementById('tab-icon')?.setAttribute('href', hasUnread ? '/favicon-unread.svg' : '/favicon.svg');
+  }, [hasUnread]);
   useEffect(() => {
     if (!sid || unread?.userId !== user?.id) return;
     const viewSession = () => { if (!document.hidden) markRead(sid); };
