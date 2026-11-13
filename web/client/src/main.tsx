@@ -72,6 +72,7 @@ function App() {
   const [turnActivity, setTurnActivity] = useState<Map<string, { running: boolean; version: number }>>(() => new Map());
   const turnVersion = useRef(0);
   const [unread, setUnread] = useState<{ userId: string; sessions: Set<string> } | null>(null);
+  const [tabUnread, setTabUnread] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({}), [desktopSidebar, setDesktopSidebar] = useState(true), [filePanel, setFilePanel] = useState(false);
   const [isMobile, setIsMobile] = useState(() => window.matchMedia(compactLayout).matches);
   const [mobileSidebar, setMobileSidebar] = useState(false);
@@ -350,6 +351,7 @@ function App() {
     Promise.allSettled([session, settings]).then(() => setBoot(false));
   }, []);
   useEffect(() => {
+    setTabUnread(false);
     if (!user) return;
     drafts.current.clear();
     pendingSend.current.clear();
@@ -497,6 +499,7 @@ function App() {
           if (!running && (data.sessionId !== selection.current.sid || document.hidden)) {
             setUnread(current => current?.userId === userId
               ? { ...current, sessions: new Set(current.sessions).add(data.sessionId) } : current);
+            if (document.hidden) setTabUnread(true);
           }
         }
         if (data.type !== 'rpc' || data.sessionId !== selection.current.sid) return;
@@ -586,14 +589,16 @@ function App() {
       localStorage.setItem('codex-unread-' + unread.userId, JSON.stringify([...unread.sessions]));
     }
   }, [unread, user?.id]);
-  const hasUnread = Boolean(user && unread?.userId === user.id && unread.sessions.size);
   useEffect(() => {
-    document.title = hasUnread ? `● ${tabTitle}` : tabTitle;
-    document.getElementById('tab-icon')?.setAttribute('href', hasUnread ? '/favicon-unread.svg' : '/favicon.svg');
-  }, [hasUnread]);
+    document.title = tabUnread ? `● ${tabTitle}` : tabTitle;
+    document.getElementById('tab-icon')?.setAttribute('href', tabUnread ? '/favicon-unread.svg' : '/favicon.svg');
+  }, [tabUnread]);
   useEffect(() => {
-    if (!sid || unread?.userId !== user?.id) return;
-    const viewSession = () => { if (!document.hidden) markRead(sid); };
+    const viewSession = () => {
+      if (document.hidden) return;
+      setTabUnread(false);
+      if (sid && unread?.userId === user?.id) markRead(sid);
+    };
     viewSession();
     document.addEventListener('visibilitychange', viewSession);
     return () => document.removeEventListener('visibilitychange', viewSession);
