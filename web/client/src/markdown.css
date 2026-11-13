@@ -9,3 +9,4 @@
 .markdown .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .markdown .footnotes { border-top:1px solid var(--border-strong,#414141); margin-top: 24px; font-size: 12px; color:var(--text-secondary,#aaa); }
 .markdown del { color:var(--text-muted,#999); }
+.agent-label .reply-copy { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }

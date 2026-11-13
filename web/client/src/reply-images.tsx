@@ -1,4 +1,5 @@
-import React, { useId } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { Check, Copy } from 'lucide-react';
 import { ReplyImage } from './message-image';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -24,9 +25,45 @@ export function imageSource(value: string, projectId: string) {
   try { decoded = decodeURIComponent(value); } catch { return ''; }
   return `/api/projects/${encodeURIComponent(projectId)}/image?path=${encodeURIComponent(decoded)}`;
 }
-export function ReplyMarkdown({text, projectId, lowData}:{text:string;projectId:string;lowData?:boolean}) {
+export function ReplyMarkdown({text, projectId, lowData, label}:{text:string;projectId:string;lowData?:boolean;label:React.ReactNode}) {
   const footnotePrefix = `reply-${useId()}-`;
-  return <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} remarkRehypeOptions={{ clobberPrefix: footnotePrefix }} urlTransform={(url, key) => {
+  const content = useRef<HTMLDivElement>(null);
+  const [copyStatus, setCopyStatus] = useState('');
+
+  useEffect(() => {
+    if (!copyStatus) return;
+    const timer = window.setTimeout(() => setCopyStatus(''), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copyStatus]);
+
+  function copyReply() {
+    const selection = window.getSelection();
+    if (!selection || !content.current) return;
+    const previous = Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index));
+    const range = document.createRange();
+    range.selectNodeContents(content.current);
+    try {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      // Native selection copy supplies both formatted HTML and plain text, including over HTTP.
+      setCopyStatus(document.execCommand('copy') ? '已复制' : '复制失败');
+    } catch {
+      setCopyStatus('复制失败');
+    } finally {
+      selection.removeAllRanges();
+      previous.forEach(saved => selection.addRange(saved));
+    }
+  }
+
+  return <>
+    <div className="agent-label">
+      {label}
+      {text.trim() && <button type="button" className="icon-button reply-copy" aria-label="复制回复内容" onClick={copyReply}>
+        {copyStatus === '已复制' ? <Check size={14}/> : <Copy size={14}/>}
+        <span aria-live="polite">{copyStatus || '复制'}</span>
+      </button>}
+    </div>
+    <div className="markdown" ref={content}><ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} remarkRehypeOptions={{ clobberPrefix: footnotePrefix }} urlTransform={(url, key) => {
     // Preserve normal remote Markdown images, including image URLs without extensions.
     if (key === 'src' && /^https?:\/\//i.test(url)) return url;
     return imageSource(url, projectId) || defaultUrlTransform(url);
@@ -37,7 +74,8 @@ export function ReplyMarkdown({text, projectId, lowData}:{text:string;projectId:
       const image = href?.startsWith(`/api/projects/${encodeURIComponent(projectId)}/image?`) || (href && imageSource(href, projectId));
       return image ? <ReplyImage src={href || ''} lowData={lowData} alt={typeof children === 'string' ? children : '返回的图片'}/> : <a {...props} href={href} target={href?.startsWith('#') ? undefined : '_blank'} rel="noopener noreferrer">{children}</a>;
     },
-  }}>{text}</ReactMarkdown>;
+    }}>{text}</ReactMarkdown></div>
+  </>;
 }
 
 export function ReturnedImage({value,projectId,lowData}:{value:string;projectId:string;lowData?:boolean}) {

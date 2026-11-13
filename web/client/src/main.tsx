@@ -981,7 +981,14 @@ function TimedItems({ items, turns, connected, ...props }: { items: Item[]; turn
 const ChatItem = memo(function ChatItem({item, projectId, threadId, lowData}:{item:Item; projectId:string; threadId:string; lowData:boolean}) {
   if(item.type==='reasoning')return null;
   if(item.type==='userMessage')return <UserMessage content={item.content || []} projectId={projectId} time={messageTime(item)}/>;
-  if(item.type==='agentMessage')return <article className="agent-message"><div className="agent-label"><Logo small/><span>AI 助手</span><MessageTime value={messageTime(item)}/></div><div className="markdown"><Suspense fallback={<div className="plain-reply">{item.text}</div>}><ReplyMarkdown text={item.text || ''} projectId={projectId} lowData={lowData}/></Suspense></div></article>;
+  if(item.type==='agentMessage') {
+    const label = <><Logo small/><span>AI 助手</span><MessageTime value={messageTime(item)}/></>;
+    return <article className="agent-message">
+      <Suspense fallback={<><div className="agent-label">{label}</div><div className="markdown plain-reply">{item.text}</div></>}>
+        <ReplyMarkdown text={item.text || ''} projectId={projectId} lowData={lowData} label={label}/>
+      </Suspense>
+    </article>;
+  }
   if(item.type==='imageView')return <Suspense fallback={<span>正在加载图片…</span>}><ReturnedImage value={(item as Item & {path:string}).path} projectId={projectId} lowData={lowData}/></Suspense>;
   if(item.type==='commandExecution')return <details className="tool-item"><summary><Terminal size={14}/><span>{item.status==='inProgress'?'正在执行命令':'执行命令'}</span><small>{item.status==='completed'?'完成':item.status==='inProgress'?'运行中':item.status}</small>{typeof item.durationMs === 'number' && Number.isFinite(item.durationMs) && item.durationMs >= 0 && <small className="tool-duration">{duration(item.durationMs,true)}</small>}<ChevronDown size={13}/></summary><pre>{item.command}</pre>{item.outputDeferred ? <DeferredOutput item={item} projectId={projectId} threadId={threadId}/> : item.aggregatedOutput && <pre className="tool-output">{item.aggregatedOutput}</pre>}</details>;
   if(item.type==='fileChange')return <details className="tool-item"><summary><FileText size={14}/><span>文件修改</span><ChevronDown size={13}/></summary><pre>{JSON.stringify(item.changes,null,2)}</pre></details>;
