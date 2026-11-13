@@ -8,6 +8,13 @@
 .chat-region .chat-scroll { scroll-behavior: auto; overflow-anchor: none; }
 .plain-reply { white-space: pre-wrap; }
 .mode-button { padding: 6px; }
+.history-more {
+  min-height: 32px;
+  margin-bottom: 25px;
+  text-align: center;
+  color: var(--text-muted,#777);
+  font-size: 11px;
+}
 
 .jump-latest {
   position: absolute;

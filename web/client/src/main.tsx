@@ -129,6 +129,7 @@ function App() {
   const historyRequest = useRef<AbortController | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const followLatest = useRef(true), prependOffset = useRef<number | null>(null);
+  const previousScrollTop = useRef(0);
   const [awayFromBottom, setAwayFromBottom] = useState(false), [newMessages, setNewMessages] = useState(false);
   const historyCursor = useRef<string | null>(null);
   const newerCursor = useRef<string | null>(null);
@@ -263,8 +264,7 @@ function App() {
   async function loadHistory(older = false, catchUp = false) {
     const selected = selection.current; if (!selected.sid) return;
     if (older && !historyCursor.current) return;
-    if (historyRequest.current && !older) return;
-    historyRequest.current?.abort();
+    if (historyRequest.current) return;
     const request = new AbortController();
     historyRequest.current = request;
     const version = ++historyVersion.current, liveAt = liveVersion.current;
@@ -598,6 +598,7 @@ function App() {
     newerCursor.current = null;
     setPlanMode(undefined);
     followLatest.current = true; prependOffset.current = null;
+    previousScrollTop.current = 0;
     setAwayFromBottom(false); setNewMessages(false);
     historyVersion.current++; fileVersion.current++; imageVersion.current++; setImages([]); setItems([]); setCursor(null); setRunning(false); setApprovals([]); setQuestionHistory(''); setRetry(null); setFilePath('');
     if (user) localStorage.setItem('codex-selection-' + user.id, JSON.stringify({ pid, sid }));
@@ -637,9 +638,12 @@ function App() {
   function onChatScroll() {
     const viewport = scroll.current;
     if (!viewport) return;
+    const scrollingUp = viewport.scrollTop < previousScrollTop.current;
+    previousScrollTop.current = viewport.scrollTop;
     followLatest.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 72;
     setAwayFromBottom(!followLatest.current);
     if (followLatest.current) setNewMessages(false);
+    if (scrollingUp && viewport.scrollTop <= 160 && historyCursor.current && !historyRequest.current) void loadHistory(true);
   }
   function jumpToLatest() {
     followLatest.current = true; setAwayFromBottom(false); setNewMessages(false);
@@ -654,6 +658,7 @@ function App() {
       prependOffset.current = null;
     } else if (followLatest.current) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
     else if (items.length || approvals.length) setNewMessages(true);
+    previousScrollTop.current = viewport.scrollTop;
   }, [items.length, items.at(-1)?.text, approvals.length, running, cursor, turnTimes]);
   async function authenticate(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError('');
@@ -841,7 +846,7 @@ function App() {
     <main className="main" inert={drawerOpen}><header className="main-header"><div className="breadcrumb">{!sidebar && <button className="icon-button" onClick={() => setSidebar(true)} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={19}/></button>}<span>{project?.name || '工作空间'}</span>{session && <><ChevronRight size={13}/><strong>{session.name}</strong></>}</div><button className={'file-toggle '+(filePanel?'selected':'')} onClick={toggleFiles} disabled={!project||!canFiles} aria-expanded={filePanel}><Files size={16}/> 文件</button></header>
     {error && <div role="alert" className="error-banner"><AlertCircle size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={15}/></button></div>}
     {!error && retry && retry.sessionId === sid && <div role="status" className="error-banner"><AlertCircle size={16}/><span>{retry.message}</span><button onClick={() => setRetry(null)} aria-label="关闭重连提示"><X size={15}/></button></div>}
-    <div className="chat-region"><div className="chat-scroll" ref={scroll} onScroll={onChatScroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <button className="older" disabled={loadingHistory} onClick={() => loadHistory(true)}>加载更早的消息</button>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}<TimedItems items={items} projectId={pid} threadId={sid} lowData={isMobile} turns={turnTimes.sid === sid ? turnTimes.turns : {}} connected={connected}/>{running && !waitingForAnswer && <div className="working"><span className="pulse"/>{turnTimes.sid === sid && Object.values(turnTimes.turns).some(turn => turn.status === 'inProgress') ? Object.values(turnTimes.turns).filter(turn => turn.status === 'inProgress').slice(-1).map(turn => <TurnTime key={turn.id} turn={turn} connected={connected}/>) : ' AI 助手 正在工作'}<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
+    <div className="chat-region"><div className="chat-scroll" ref={scroll} onScroll={onChatScroll}>{!session ? <div className="welcome"><Logo/><div className="eyebrow">LET’S BUILD SOMETHING</div><h1>{project ? '让这个项目，向前一步。' : '今天，想完成什么？'}</h1><p>{project ? '新建一个会话，开始与你的 AI 助手 协作。' : '从一个项目开始，把想法变成实际成果。'}</p><button className="primary" onClick={() => openDialog(project ? {type:'session',title:'创建会话',project} : {type:'project',title:'新建项目'})}><Plus size={17}/>{project?'新建会话':'选择工作目录'}</button><div className="suggestions"><div><Globe/><strong>探索与调研</strong><span>浏览公开资料，整理关键发现</span></div><div><FileText/><strong>文档与报告</strong><span>生成可下载的办公文件</span></div><div><Terminal/><strong>构建与自动化</strong><span>让重复工作自动完成</span></div></div></div> : <div className="conversation">{cursor && <div className="history-more" role="status">{loadingHistory ? '正在加载历史消息…' : ''}</div>}{loadingHistory && items.length===0 && <div className="history-loading">正在加载会话…</div>}{items.length===0 && !loadingHistory && <div className="session-welcome"><Logo/><h2>从这里开始</h2><p>描述你想完成的任务，AI 助手 将在这个项目里工作。</p></div>}<TimedItems items={items} projectId={pid} threadId={sid} lowData={isMobile} turns={turnTimes.sid === sid ? turnTimes.turns : {}} connected={connected}/>{running && !waitingForAnswer && <div className="working"><span className="pulse"/>{turnTimes.sid === sid && Object.values(turnTimes.turns).some(turn => turn.status === 'inProgress') ? Object.values(turnTimes.turns).filter(turn => turn.status === 'inProgress').slice(-1).map(turn => <TurnTime key={turn.id} turn={turn} connected={connected}/>) : ' AI 助手 正在工作'}<span className="working-hint">{canSteer ? '可以追加要求或停止任务' : '可以停止任务'}</span></div>}{approvals.map(a => a.method === 'mcpServer/elicitation/request' ? <ElicitationForm key={JSON.stringify([sid, a.id])} request={a.params} respond={async answer => {
       await post(sessionUrl()+'/approval', {requestId:a.id, ...answer});
       if (selection.current.sid === sid) setApprovals(current => current.filter(request => request !== a));
     }}/> : a.method === 'item/tool/requestUserInput' ? (() => {
@@ -856,7 +861,7 @@ function App() {
     })() : <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method === 'item/permissions/requestApproval' && <pre className="permission-request">{JSON.stringify(a.params.permissions, null, 2)}</pre>}{['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'].includes(a.method) ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}{pendingAsync.map(question => {
       const key = JSON.stringify([sid, question.id]);
       const draft = questionDraft(key);
-      return <UserInputRequest key={key} draft={draft} blocking={false} disabled={!connected || running || questionHistory !== sid}
+      return <UserInputRequest key={key} draft={draft} blocking={false} disabled={!connected || questionHistory !== sid} waitingForTurn={running}
         questions={[{ id: question.id, header: '', question: question.title, isOther: true,
           options: question.options.map(label => ({ label })) }]}
         onSkip={() => { draft.submitted = true; draft.answers.clear(); setQuestionRevision(value => value + 1); }}

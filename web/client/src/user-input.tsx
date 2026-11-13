@@ -14,11 +14,12 @@ type Draft = { selected?: string; note?: string };
 export type QuestionDraft = { index: number; answers: Map<string, Draft>; requestId?: string; submitted?: boolean; startedAt?: number; touched?: boolean; answer?: string };
 export type Answers = Record<string, { answers: string[] }>;
 
-export function UserInputRequest({ questions, draft, blocking, disabled, onSubmit, onSkip }: {
+export function UserInputRequest({ questions, draft, blocking, disabled, waitingForTurn = false, onSubmit, onSkip }: {
   questions: InputQuestion[];
   draft: QuestionDraft;
   blocking: boolean;
   disabled: boolean;
+  waitingForTurn?: boolean;
   onSubmit: (answers: Answers) => Promise<void>;
   onSkip?: () => void;
 }) {
@@ -27,8 +28,9 @@ export function UserInputRequest({ questions, draft, blocking, disabled, onSubmi
   const [answers, setAnswers] = useState(draft.answers);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [remaining, setRemaining] = useState<number | null>(null);
+  const submitDisabled = disabled || waitingForTurn;
   useEffect(() => {
-    if (blocking || onSkip || disabled || draft.touched) { setRemaining(null); return; }
+    if (blocking || onSkip || submitDisabled || draft.touched) { setRemaining(null); return; }
     draft.startedAt ??= Date.now();
     let attempted = false;
     const tick = async () => {
@@ -43,7 +45,7 @@ export function UserInputRequest({ questions, draft, blocking, disabled, onSubmi
     };
     const timer = setInterval(() => { void tick(); }, 1000);
     return () => clearInterval(timer);
-  }, [blocking, disabled, draft, onSkip, onSubmit]);
+  }, [blocking, submitDisabled, draft, onSkip, onSubmit]);
   const question = questions[index];
   if (!question) return <p className="question-card">此问题格式暂不支持。</p>;
   const value = answers.get(question.id) || {};
@@ -63,7 +65,7 @@ export function UserInputRequest({ questions, draft, blocking, disabled, onSubmi
   async function submit(skip: boolean) {
     if (inFlight.current) return;
     if (skip && onSkip) { onSkip(); return; }
-    if (disabled) return;
+    if (submitDisabled) return;
     draft.touched = true; setRemaining(null);
     if (index < questions.length - 1) {
       if (skip) update({ selected: undefined, note: undefined });
@@ -93,13 +95,14 @@ export function UserInputRequest({ questions, draft, blocking, disabled, onSubmi
           onChange={event => update({ note: event.target.value, ...(onSkip ? { selected: undefined } : {}) })}/>
       </label>}
     </fieldset>
-    {disabled && <p role="status">暂时无法提交，请等待问题同步或当前任务结束。</p>}
+    {disabled ? <p role="status">暂时无法提交，请等待连接恢复或问题同步。</p>
+      : waitingForTurn && <p role="status">可以先选择或填写，当前任务结束后即可发送。</p>}
     {remaining !== null && <p role="status">{remaining} 秒后自动跳过，选择或填写后保留此问题。</p>}
     {error && <p role="alert" className="inline-error">{error}</p>}
     <footer>
       {index > 0 && <button type="button" className="secondary" disabled={busy} onClick={() => move(index - 1)}>上一题</button>}
-      <button type="button" className="secondary" disabled={busy || (disabled && !onSkip)} onClick={() => void submit(true)}>跳过</button>
-      <button className="primary" disabled={busy || disabled || !reply(question).length}>{busy ? '提交中…' : index < questions.length - 1 ? '下一题' : '发送'}</button>
+      <button type="button" className="secondary" disabled={busy || (submitDisabled && !onSkip)} onClick={() => void submit(true)}>跳过</button>
+      <button className="primary" disabled={busy || submitDisabled || !reply(question).length}>{busy ? '提交中…' : index < questions.length - 1 ? '下一题' : '发送'}</button>
     </footer>
   </form>;
 }
