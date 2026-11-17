@@ -1,9 +1,15 @@
 // Deterministic Responses SSE provider for the isolated app-server acceptance.
 const http = require('node:http');
 const { randomUUID } = require('node:crypto');
+let releaseActive;
 
 http.createServer(async (request, response) => {
   if (request.url === '/health') return response.end('ok');
+  if (request.method === 'POST' && request.url === '/release-active') {
+    if (!releaseActive) return response.writeHead(409).end();
+    releaseActive();
+    return response.end('ok');
+  }
   if (request.url.endsWith('/models')) {
     return response.end(JSON.stringify({ data: [{ id: 'gpt-5.4', object: 'model' }] }));
   }
@@ -34,9 +40,17 @@ http.createServer(async (request, response) => {
   console.log(JSON.stringify({ mode, requestedTool: call ? item.name : null,
     advertised: call ? JSON.stringify(body.tools || []).includes(`"${item.name}"`) : undefined,
     answerReceived: Boolean(answered || prompt.includes('<send_user_message_question_reply>')) }));
+  const hold = prompt.includes('INPUT_ASYNC_ACTIVE') && answered;
   const events = [{ type: 'response.created', response: { id } }, { type: 'response.output_item.done', item },
     { type: 'response.completed', response: { id, usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } } }];
   response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+  if (hold) {
+    response.flushHeaders();
+    await new Promise(resolve => {
+      const timeout = setTimeout(() => releaseActive?.(), 30000);
+      releaseActive = () => { clearTimeout(timeout); releaseActive = undefined; resolve(); };
+    });
+  }
   for (const event of events) response.write(`data: ${JSON.stringify(event)}\n\n`);
   response.end();
 }).listen(38119, '0.0.0.0');

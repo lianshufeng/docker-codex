@@ -143,6 +143,27 @@ const { chromium } = require('/usr/local/lib/node_modules/playwright');
     assert.equal(await a.locator('.question-card').count(), 0);
     assert.ok((await a.locator('.question-answer').textContent()).includes('浅色'));
     report.checks.push('真实app-server异步提问、刷新恢复、原生回答标记到达模型接口、其他账号及刷新后不重复提问'); save();
+    for (const answer of ['浅色', '运行中填写中文']) {
+      await until(async () => (await bus.rpc('thread/read', { threadId: other })).thread.status.type === 'idle');
+      const { turnId } = await api(contexts[0], asyncRoute + '/messages', 'POST', { text: 'INPUT_ASYNC_ACTIVE' });
+      await card(a).waitFor(); await card(b).waitFor();
+      if (answer === '浅色') await card(a).getByRole('radio', { name: answer, exact: true }).check();
+      else await card(a).getByLabel('自行填写或补充说明').fill(answer);
+      assert.equal((await bus.rpc('thread/read', { threadId: other })).thread.status.type, 'active');
+      const receipt = a.waitForResponse(response => response.url().endsWith('/messages') && response.request().method() === 'POST');
+      await card(a).getByRole('button', { name: '发送', exact: true }).click();
+      const submitted = await receipt;
+      assert.deepEqual(await submitted.json(), { turnId, steered: true });
+      const { questionId, requestId } = submitted.request().postDataJSON();
+      await api(contexts[0], asyncRoute + '/messages', 'POST', { questionId, answer, requestId });
+      await api(contexts[1], asyncRoute + '/messages', 'POST', { questionId, answer, requestId: randomUUID().replaceAll('-', '') }, 409);
+      await until(async () => (await fetch('http://codex-input-provider:38119/release-active', { method: 'POST' })).ok);
+      await until(async () => (await bus.rpc('thread/turns/list', { threadId: other, limit: 1, itemsView: 'full', sortDirection: 'desc' }))
+        .data.some(turn => turn.id === turnId && turn.status === 'completed' && turn.items.some(item =>
+          item.type === 'agentMessage' && item.text.includes('异步回答已到达模型接口') && item.text.includes(answer))));
+      await until(async () => !await a.locator('.question-card').count() && !await b.locator('.question-card').count());
+    }
+    report.checks.push('运行中可点击发送选项和自由文本，模型在同一轮收到答案，两账号同步关闭卡片'); save();
     await api(contexts[0], asyncRoute + '/messages', 'POST', { text: 'INPUT_ASYNC' });
     await card(a).waitFor();
     await until(async () => await card(a).getByRole('button', { name: '发送', exact: true }).isEnabled().catch(() => false) ||

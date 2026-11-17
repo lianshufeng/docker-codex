@@ -442,10 +442,16 @@ export function sharedApi(bus, config, broadcast) {
         if (!receipt.result) throw new HttpError(503, '上一条消息的发送结果待确认，请查看会话历史');
         return res.json({ ...receipt.result, duplicate: true });
       }
-      if (questionId) {
-        const answeredKey = JSON.stringify([t.id, questionId]);
+      const answeredKey = questionId && JSON.stringify([t.id, questionId]);
+      if (questionId) requireValue(!text && !req.body.steer && !images.length && !files.length && !attachments.length, '请单独提交问题回答');
+      function rememberQuestion() {
+        if (!answeredKey) return;
+        const now = Date.now();
+        for (const [id, expires] of answeredQuestions) if (expires <= now) answeredQuestions.delete(id);
+        answeredQuestions.set(answeredKey, now + 15 * 60_000);
+      }
+      async function validateQuestion() {
         if (answeredQuestions.get(answeredKey) > Date.now()) throw new HttpError(409, '此问题已提交，请刷新查看结果');
-        requireValue(!text && !req.body.steer && !images.length && !files.length && !attachments.length, '请单独提交问题回答');
         const items = [];
         const visited = new Set();
         let cursor;
@@ -459,10 +465,12 @@ export function sharedApi(bus, config, broadcast) {
         } while (cursor);
         const question = pendingQuestions(items).find(question => question.id === questionId);
         if (!question) throw new HttpError(409, '此问题已结束或不可回答');
-        text = questionReply(question, answer.trim());
+        return questionReply(question, answer.trim());
       }
-      if (!req.body.steer && (t.status?.type === 'active' || reservations.has(t.id))) throw new HttpError(409, '会话正在执行');
-      if (req.body.steer && !bus.supports('turn/steer')) throw new HttpError(409, '执行端不支持追加要求');
+      if (questionId) text = await validateQuestion();
+      const steer = req.body.steer || questionId && (t.status?.type === 'active' || reservations.has(t.id));
+      if (!steer && (t.status?.type === 'active' || reservations.has(t.id))) throw new HttpError(409, '会话正在执行');
+      if (steer && !bus.supports('turn/steer')) throw new HttpError(409, '执行端不支持追加要求');
       const content = text.trim() ? [{ type: 'text', text }] : [];
       for (const transferId of attachments) {
         const receipt = await transfer(req, { op: 'status', transferId });
@@ -485,16 +493,31 @@ export function sharedApi(bus, config, broadcast) {
             : { type: 'text', text: `附件：${JSON.stringify({ name: f.name, path: relative })}` });
         }
       }
-      if (req.body.steer) {
+      if (steer) {
         const history = await turns(t.id), activeTurn = history.data.find(x => x.status === 'inProgress');
         const turnId = activeTurn?.id || reservations.get(t.id);
-        requireValue(turnId && turnId !== 'pending', '没有可追加的活动任务');
-        remember(null);
-        try { await bus.rpc('turn/steer', { threadId: t.id, expectedTurnId: turnId, input: content }); }
-        catch (error) { if (![503, 504].includes(error.status)) submitted.delete(key); throw error; }
-        const result = { turnId, steered: true };
-        remember(result);
-        return res.json(result);
+        if (turnId && turnId !== 'pending') {
+          remember(null);
+          rememberQuestion();
+          try {
+            await bus.rpc('turn/steer', { threadId: t.id, expectedTurnId: turnId, input: content });
+            const result = { turnId, steered: true };
+            remember(result);
+            return res.json(result);
+          } catch (error) {
+            if ([503, 504].includes(error.status)) throw error;
+            submitted.delete(key);
+            if (answeredKey) answeredQuestions.delete(answeredKey);
+            // Only a definite rejection for an ended turn permits a fresh submission.
+            if (!questionId || !/no active turn|active turn.*(?:ended|completed)|expected turn.*(?:mismatch|does not match)|turn.*is not active/i.test(error.message)) throw error;
+          }
+        } else if (!questionId) {
+          throw new HttpError(409, '没有可追加的活动任务');
+        }
+        t = await thread(req);
+        if (t.status?.type === 'active') throw new HttpError(409, '任务状态已变化，请重试提交回答');
+        if (turnId && turnId !== 'pending' && reservations.get(t.id) === turnId) reservations.delete(t.id);
+        content[0].text = await validateQuestion();
       }
       await admissions.run('tasks', async () => {
         if (reservations.has(t.id) || t.status?.type === 'active') throw new HttpError(409, '会话正在执行');
@@ -515,11 +538,7 @@ export function sharedApi(bus, config, broadcast) {
             model, reasoning_effort: effective?.model_reasoning_effort ?? null, developer_instructions: null } };
         }
         remember(null);
-        if (questionId) {
-          const now = Date.now();
-          for (const [key, expires] of answeredQuestions) if (expires <= now) answeredQuestions.delete(key);
-          answeredQuestions.set(JSON.stringify([t.id, questionId]), now + 15 * 60_000);
-        }
+        rememberQuestion();
         const { turn } = await bus.rpc('turn/start', { threadId: t.id, input: content, ...(collaborationMode ? { collaborationMode } : {}) });
         if (reservations.has(t.id)) reservations.set(t.id, turn.id);
         const result = { turnId: turn.id };
@@ -528,7 +547,7 @@ export function sharedApi(bus, config, broadcast) {
       } catch (error) {
         if (![503, 504].includes(error.status)) {
           reservations.delete(t.id); submitted.delete(key);
-          if (questionId) answeredQuestions.delete(JSON.stringify([t.id, questionId]));
+          if (answeredKey) answeredQuestions.delete(answeredKey);
         }
         throw error;
       }

@@ -872,7 +872,7 @@ function App() {
     })() : <div className="approval" key={String(a.id)}><strong>AI 助手 需要你的确认</strong><p>{a.params?.reason || a.params?.command || a.method}</p>{a.method === 'item/permissions/requestApproval' && <pre className="permission-request">{JSON.stringify(a.params.permissions, null, 2)}</pre>}{['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'].includes(a.method) ? <div>{['accept','decline'].map(decision => <button key={decision} onClick={async () => { try { await post(sessionUrl()+'/approval',{requestId:a.id,decision}); setApprovals(v=>v.filter(x=>x.id!==a.id)); }catch(e:any){setError(e.message)} }}>{decision==='accept'?'允许':'拒绝'}</button>)}</div> : <p>此请求类型暂不支持，请停止任务后调整要求。</p>}</div>)}{pendingAsync.map(question => {
       const key = JSON.stringify([sid, question.id]);
       const draft = questionDraft(key);
-      return <UserInputRequest key={key} draft={draft} blocking={false} disabled={!connected || questionHistory !== sid} waitingForTurn={running}
+      return <UserInputRequest key={key} draft={draft} blocking={false} disabled={!connected || questionHistory !== sid}
         questions={[{ id: question.id, header: '', question: question.title, isOther: true,
           options: question.options.map(label => ({ label })) }]}
         onSkip={() => { draft.submitted = true; draft.answers.clear(); setQuestionRevision(value => value + 1); }}

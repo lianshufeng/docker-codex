@@ -5,7 +5,7 @@
 ## 协议和行为
 
 - 同步提问处理 `item/tool/requestUserInput`。每题使用答案数组，选项按标签返回，备注使用 `user_note: ` 前缀，未回答的题目使用空数组。没有 `isBlocking` 时按阻塞式处理。非阻塞问题遵循上游终端的 60 秒等待和 60 秒倒计时，当前页面开始选择或填写后停止该页面的倒计时。
-- 异步提问读取助手消息的 `questions`，使用稳定的问题标识区分同名问题。回答按上游客户端格式提交为新一轮用户输入。执行中的会话等到空闲后才能提交。跳过仅关闭当前页面的卡片，刷新后可以重新显示。其他客户端提交答案后，历史中的回答标识可关闭对应卡片。
+- 异步提问读取助手消息的 `questions`，使用稳定的问题标识区分同名问题。会话运行中通过 `turn/steer` 发送回答，空闲时通过 `turn/start` 发送，两种情况都使用上游回答格式。当前轮在提交期间结束时，确认问题仍有效、会话已空闲后可开启新一轮。跳过仅关闭当前页面的卡片，刷新后可以重新显示。其他客户端提交答案后，历史中的回答标识可关闭对应卡片。
 - 同步请求使用原始请求 ID 和执行端实例校验，按请求串行提交。Docker 桥为 Web 提供仍待处理的请求快照，可在浏览器或 Web 服务重启后恢复。桌面桥尝试通过 `thread/resume` 触发上游重放，实际是否收到取决于桌面桥和执行端能力。
 
 源码依据见上游 [提问协议](https://github.com/openai/codex/blob/rust-v0.167.2/codex-rs/app-server-protocol/schema/typescript/v2/ToolRequestUserInputParams.ts)、[终端同步提问](https://github.com/openai/codex/blob/rust-v0.167.2/codex-rs/tui/src/bottom_pane/request_user_input/mod.rs)、[异步回答格式](https://github.com/openai/codex/blob/rust-v0.167.2/codex-rs/context-fragments/src/answered_question.rs)和[恢复时重放待处理请求](https://github.com/openai/codex/blob/rust-v0.167.2/codex-rs/app-server/src/outgoing_message.rs)。
@@ -19,6 +19,8 @@
 - 浅色、深色和手机视口已截图。浏览器响应夹具验证密码输入、键盘提交、提交失败保留内容和重试，以及虚拟时钟触发非阻塞问题自动跳过。
 
 ## 验收限制和记录
+
+2026-11-17 在隔离 Compose `codex-input-steer` 中复跑。使用 Codex 0.167.2、MQTT、Web、镜像预装的 Playwright 和 Chromium，以及可控 Responses SSE。分别在任务运行中发送选项和中文自由文本，确认 Web 返回原轮次 ID，模型接口在同一轮收到答案，两个账号同步关闭卡片。验证重复请求和其他账号重复提交、空闲提交、同步提问、断网恢复、Web 与执行端重启、未登录拒绝。52 项 Web 测试和 4 项桥接测试通过，接口测试覆盖轮次结束后的重新投递和超时去重。本次结果记录在 Git 忽略的 `tmp/input-steer/results/input-ui.json`，验收会话与测试目录按清单清理。
 
 独立测试的现有模型服务在提问前返回 HTTP 504，最小请求重试也在 60 秒内未返回。因此真实模型发起同步和异步问题的目标仍未通过。可控响应测试验证了真实 app-server 的协议和端到端传输。正式 Windows 桌面桥没有进行浏览器闭环验收。
 
