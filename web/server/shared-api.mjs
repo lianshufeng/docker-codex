@@ -10,6 +10,7 @@ import { decodeImages, decodeFiles } from './images.mjs';
 import { absolute, projectId, projectOf, sessionOf, listThreadPage, listThreads, checkedPath, imageLocation, projectOptions, linuxProjectPath } from './app-workspace.mjs';
 import { historyPage } from './history-page.mjs';
 import { projectCatalog } from './project-catalog.mjs';
+import { modelCatalog } from './model-catalog.mjs';
 import { normalizeAnswers, parseQuestionReply, pendingQuestions, questionKey, questionReply } from '../user-input.mjs';
 
 export function sharedApi(bus, config, broadcast) {
@@ -32,7 +33,9 @@ export function sharedApi(bus, config, broadcast) {
   const waiting = t => Boolean(t.status?.activeFlags?.includes('waitingOnUserInput'));
   const listedSession = t => ({ ...sessionOf(t), running: t.status?.type === 'active' || reservations.has(t.id), waiting: waiting(t) });
   const catalogPage = projectCatalog(bus, listedSession);
+  const models = modelCatalog(bus, config.modelProviders);
   const capabilities = () => ({ steer: bus.supports('turn/steer'), plan: bus.supports('config/read') && bus.supports('turn/start'),
+    models: models.supported(),
     renameThread: bus.supports('thread/name/set'), archiveThread: bus.supports('thread/archive'), deleteProject: bus.supports('thread/delete'),
     files: bus.supports('fs/readDirectory') && bus.supports('fs/readFile'), shared: true,
     fileTransfer: transport?.limits(), maxFileBytes: transport?.limits() ? transport.limits().maxFileBytes : null });
@@ -104,6 +107,11 @@ export function sharedApi(bus, config, broadcast) {
     if (projectId(result.thread.cwd) !== req.params.pid) throw new HttpError(404, '会话不在此目录');
     return result.thread;
   }
+  function resumeThread(t, timeout) {
+    return bus.rpc('thread/resume', { threadId: t.id, excludeTurns: true,
+      ...(t.modelProvider ? { modelProvider: t.modelProvider } : {}), ...(t.model ? { model: t.model } : {}),
+      ...(t.reasoningEffort ? { config: { model_reasoning_effort: t.reasoningEffort } } : {}) }, timeout);
+  }
   async function pendingForThread(t) {
     if (bus.remote?.pendingRequests && bus.remote.runId) {
       const snapshot = await bus.rpc('bridge/pendingRequests', { runId: bus.remote.runId, threadId: t.id }, 5000);
@@ -111,7 +119,7 @@ export function sharedApi(bus, config, broadcast) {
     }
     if (waiting(t) && ![...approvals.values()].some(request => request.params?.threadId === t.id)) {
       // A running thread can replay pending requests to its attached client on resume.
-      await bus.rpc('thread/resume', { threadId: t.id, excludeTurns: true }, 5000).catch(error => {
+      await resumeThread(t, 5000).catch(error => {
         if (error.status === 503) throw error;
       });
     }
@@ -167,6 +175,8 @@ export function sharedApi(bus, config, broadcast) {
     res.json(await transfer(req, { op: 'abort', transferId: req.params.upload }));
   });
   router.get('/status', (req, res) => res.json(status()));
+  router.get('/models', async (req, res) => res.json(await models.options()));
+  router.get('/projects/:pid/models', async (req, res) => res.json(await models.options(null, root(req))));
   router.get('/projects', async (req, res) => {
     const paged = req.query.view === 'page';
     const selected = typeof req.query.selected === 'string' ? req.query.selected : '';
@@ -218,14 +228,17 @@ export function sharedApi(bus, config, broadcast) {
     const sessions = threads.filter(t => t.cwd && projectId(t.cwd) === req.params.pid).map(listedSession);
     res.json({ sessions });
   });
-  async function create(cwd, name) {
+  async function create(cwd, name, settings) {
     if (deletingProjects.has(projectId(cwd))) throw new HttpError(409, '项目正在删除，请稍后重试');
-    return locks.run(`project:${projectId(cwd)}`, () => createThread(cwd, name));
+    return locks.run(`project:${projectId(cwd)}`, () => createThread(cwd, name, settings));
   }
-  async function createThread(cwd, name) {
+  async function createThread(cwd, name, settings) {
     const requestedName = name ? displayName(name) : undefined;
     if (requestedName && !bus.supports('thread/name/set')) throw new HttpError(409, '当前连接尚未支持修改会话名称，请更新桌面连接服务，或不填写名称创建会话');
-    const { thread: created } = await bus.rpc('thread/start', { cwd, sandbox: config.sandbox, approvalPolicy: config.approvalPolicy });
+    const selected = settings === undefined ? null : await models.selection(settings, cwd);
+    const { thread: created } = await bus.rpc('thread/start', { cwd, sandbox: config.sandbox, approvalPolicy: config.approvalPolicy,
+      ...(selected ? { model: selected.model, modelProvider: selected.provider,
+        ...(selected.effort ? { config: { model_reasoning_effort: selected.effort } } : {}) } : {}) });
     if (projectId(created.cwd) !== projectId(cwd)) throw new HttpError(502, '执行端工作目录不匹配');
     let warning;
     if (requestedName) {
@@ -258,7 +271,7 @@ export function sharedApi(bus, config, broadcast) {
       const { stat } = await checkedPath(bus, cwd);
       requireValue(stat.isDirectory, '请选择已有目录');
     }
-    const { thread: t } = await create(cwd);
+    const { thread: t } = await create(cwd, undefined, req.body.modelSettings);
     res.status(201).json({ project: { ...projectOf(t.cwd), sessions: [sessionOf(t)] } });
   });
   router.get('/project-options', async (req, res) => res.json(await projectOptions(bus)));
@@ -356,7 +369,7 @@ export function sharedApi(bus, config, broadcast) {
     });
   });
   router.post('/projects/:pid/sessions', async (req, res) => {
-    const created = await create(root(req), req.body.name);
+    const created = await create(root(req), req.body.name, req.body.modelSettings);
     res.status(201).json({ session: sessionOf(created.thread), ...(created.warning ? { warning: created.warning } : {}) });
   });
   router.patch('/projects/:pid/sessions/:sid', async (req, res) => {
@@ -386,6 +399,7 @@ export function sharedApi(bus, config, broadcast) {
   router.post('/projects/:pid/sessions/:sid/archive', archiveSession);
   // Older pages may still submit DELETE. They receive the same archive behavior.
   router.delete('/projects/:pid/sessions/:sid', archiveSession);
+  router.get('/projects/:pid/sessions/:sid/models', async (req, res) => res.json(await models.options(await thread(req))));
   router.get('/projects/:pid/sessions/:sid/history', async (req, res) => {
     const t = await thread(req), cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
     const pending = () => pendingForThread(t);
@@ -417,13 +431,15 @@ export function sharedApi(bus, config, broadcast) {
   router.post('/projects/:pid/sessions/:sid/messages', express.json({ limit: Number.MAX_SAFE_INTEGER }), async (req, res) => {
     const requestId = req.body.requestId;
     requireValue(requestId === undefined || (typeof requestId === 'string' && /^[a-f0-9]{32}$/i.test(requestId)), '消息请求标识无效');
+    const settings = req.body.modelSettings;
+    const settingsKey = JSON.stringify([settings?.model, settings?.effort, settings?.provider, req.body.plan]);
     const key = requestId && JSON.stringify([req.user?.id, req.params.sid, requestId]);
     const remember = result => {
       if (!key) return;
       const now = Date.now();
       for (const [id, receipt] of submitted) if (receipt.expires <= now) submitted.delete(id);
       if (submitted.size >= 2048) submitted.delete(submitted.keys().next().value);
-      submitted.set(key, { result, expires: now + 15 * 60_000 });
+      submitted.set(key, { result, settingsKey, expires: now + 15 * 60_000 });
     };
     let text = req.body.text || '';
     const { questionId, answer } = req.body;
@@ -439,6 +455,7 @@ export function sharedApi(bus, config, broadcast) {
       let t = await thread(req);
       const receipt = key && submitted.get(key);
       if (receipt && receipt.expires > Date.now()) {
+        if (receipt.settingsKey !== settingsKey) throw new HttpError(409, '此请求已使用其他模型设置提交');
         if (!receipt.result) throw new HttpError(503, '上一条消息的发送结果待确认，请查看会话历史');
         return res.json({ ...receipt.result, duplicate: true });
       }
@@ -469,8 +486,10 @@ export function sharedApi(bus, config, broadcast) {
       }
       if (questionId) text = await validateQuestion();
       const steer = req.body.steer || questionId && (t.status?.type === 'active' || reservations.has(t.id));
+      requireValue(settings === undefined || !steer && !questionId, '模型设置只能用于新消息');
       if (!steer && (t.status?.type === 'active' || reservations.has(t.id))) throw new HttpError(409, '会话正在执行');
       if (steer && !bus.supports('turn/steer')) throw new HttpError(409, '执行端不支持追加要求');
+      const selected = settings === undefined ? null : await models.selection(settings, t.cwd, t);
       const content = text.trim() ? [{ type: 'text', text }] : [];
       for (const transferId of attachments) {
         const receipt = await transfer(req, { op: 'status', transferId });
@@ -524,22 +543,17 @@ export function sharedApi(bus, config, broadcast) {
         reservations.set(t.id, 'pending');
       });
       try {
-        if (t.status?.type === 'notLoaded') t = (await bus.rpc('thread/resume', { threadId: t.id, excludeTurns: true })).thread;
-        let collaborationMode;
+        const resumed = t.status?.type === 'notLoaded' ? await resumeThread(t) : null;
+        if (resumed) t = resumed.thread;
+        let overrides = selected ? { model: selected.model, ...(selected.effort ? { effort: selected.effort } : {}) } : {};
         if (typeof req.body.plan === 'boolean') {
-          const { config: effective } = await bus.rpc('config/read', { cwd: t.cwd });
-          let model = effective?.model;
-          if (!model) {
-            const { data } = await bus.rpc('model/list');
-            model = data.find(candidate => candidate.isDefault)?.model;
-          }
-          requireValue(typeof model === 'string' && model, '无法确定协作模式使用的模型');
-          collaborationMode = { mode: req.body.plan ? 'plan' : 'default', settings: {
-            model, reasoning_effort: effective?.model_reasoning_effort ?? null, developer_instructions: null } };
+          const { model, effort } = selected || await models.planDefaults(t, resumed);
+          overrides = { collaborationMode: { mode: req.body.plan ? 'plan' : 'default', settings: {
+            model, reasoning_effort: effort, developer_instructions: null } } };
         }
         remember(null);
         rememberQuestion();
-        const { turn } = await bus.rpc('turn/start', { threadId: t.id, input: content, ...(collaborationMode ? { collaborationMode } : {}) });
+        const { turn } = await bus.rpc('turn/start', { threadId: t.id, input: content, ...overrides });
         if (reservations.has(t.id)) reservations.set(t.id, turn.id);
         const result = { turnId: turn.id };
         remember(result);

@@ -11,6 +11,7 @@ import { duration, messageTime, separator, type ItemTiming, type TurnTiming } fr
 import { Plus, Folder, FolderOpen, MessageSquare, LoaderCircle, PanelLeftClose, PanelLeftOpen, ArrowUp, Square, ChevronDown, ChevronRight, Files, X, Download, Archive, Trash2, RefreshCw, LogOut, KeyRound, Settings2, ArrowLeft, Check, AlertCircle, Pencil, Terminal, Globe, File, FileText } from 'lucide-react';
 import './style.css';
 import { ThemeSettings } from './theme-settings';
+import { NewSessionModelPicker, SessionModelPicker, useModelCatalog, type ModelSettings, type NewSessionModel } from './model-picker';
 import './images.css';
 import './chat-scroll.css';
 
@@ -106,6 +107,9 @@ function App() {
   const [menu, setMenu] = useState(false), [socketConnected, setSocketConnected] = useState(false);
   const [images, setImages] = useState<Attachment[]>([]);
   const [planMode, setPlanMode] = useState<boolean | undefined>(undefined);
+  const modelDrafts = useRef(new Map<string, ModelSettings>());
+  const [, modelDraftChanged] = useState(0);
+  const [newSessionModel, setNewSessionModel] = useState<NewSessionModel>();
   const fileInput = useRef<HTMLInputElement>(null);
   const drawer = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -139,6 +143,21 @@ function App() {
   const approvalVersion = useRef(0);
   const project = projects.find(p => p.id === pid), session = project?.sessions.find(s => s.id === sid);
   const sessionUrl = (p = pid, s = sid) => `/projects/${p}/sessions/${s}`;
+  const canPickModel = Boolean(user && status.capabilities?.models);
+  const catalogGeneration = user ? `${user.id}:${status.runId}` : undefined;
+  const modelDraftKey = JSON.stringify([catalogGeneration, sid]);
+  const modelDraft = modelDrafts.current.get(modelDraftKey);
+  function setModelDraft(value?: ModelSettings) {
+    if (value) modelDrafts.current.set(modelDraftKey, value);
+    else modelDrafts.current.delete(modelDraftKey);
+    modelDraftChanged(revision => revision + 1);
+  }
+  const sessionModels = useModelCatalog(api, sessionUrl() + '/models',
+    canPickModel && Boolean(session) && status.connected && socketConnected, catalogGeneration, running);
+  const creatingSession = dialog?.type === 'project' || dialog?.type === 'session';
+  const creationModels = useModelCatalog(api, dialog?.project ? `/projects/${dialog.project.id}/models` : '/models',
+    canPickModel && creatingSession && status.connected && socketConnected, catalogGeneration);
+  useEffect(() => { modelDrafts.current.clear(); setNewSessionModel(undefined); }, [catalogGeneration]);
   useEffect(() => {
     const media = window.matchMedia(compactLayout);
     const update = () => { setIsMobile(media.matches); setMobileSidebar(false); setFilePanel(false); };
@@ -678,14 +697,14 @@ function App() {
       const result = await post('/auth/login', { username, password }); setUser(result.user); setPassword('');
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   }
-  function openDialog(value: Dialog) { setNotice(''); setProjectLocation(null); setDialog(value); setDialogValue(value.value || ''); setOldPassword(''); setMenu(false); setError(''); }
+  function openDialog(value: Dialog) { setNotice(''); setProjectLocation(null); setNewSessionModel(undefined); setDialog(value); setDialogValue(value.value || ''); setOldPassword(''); setMenu(false); setError(''); }
   async function confirmDialog(event: React.FormEvent) {
     event.preventDefault(); if (!dialog) return; setBusy(true); setError('');
     try {
       const p = dialog.project;
       if (dialog.type === 'project') {
         if (!projectLocation) return;
-        const { project: created } = await post('/projects', projectLocation);
+        const { project: created } = await post('/projects', { ...projectLocation, modelSettings: newSessionModel });
         setCatalogIds(current => [created.id, ...current.filter(id => id !== created.id)]);
         setProjects(current => {
           const existing = current.find(project => project.id === created.id);
@@ -695,7 +714,9 @@ function App() {
         selectSession(created.id, created.sessions[0]?.id || '');
         void refreshProjects().catch(e => setError(e.message));
       } else if (dialog.type === 'session' && p) {
-        const result = await post(`/projects/${p.id}/sessions`, status.capabilities?.renameThread === false ? {} : { name: dialogValue || '新会话' });
+        const result = await post(`/projects/${p.id}/sessions`, {
+          name: status.capabilities?.renameThread === false ? undefined : dialogValue || '新会话', modelSettings: newSessionModel,
+        });
         setProjects(current => current.map(project => project.id === p.id
           ? { ...project, sessions: [result.session, ...project.sessions.filter(session => session.id !== result.session.id)] } : project));
         setPid(p.id); setSid(result.session.id); setDialog(null); if (isMobile) setSidebar(false);
@@ -772,8 +793,10 @@ function App() {
     imageVersion.current++;
     const liveAt = liveVersion.current;
     const payload = { text: message, files: images.filter(file => !file.transferId),
-      attachments: images.filter(file => file.transferId).map(file => file.transferId), steer, plan: planMode };
-    const fingerprint = JSON.stringify([message, payload.attachments, images.map(file => [file.name, file.size, file.data.length]), planMode]);
+      attachments: images.filter(file => file.transferId).map(file => file.transferId), steer, plan: steer ? undefined : planMode,
+      modelSettings: steer || !canPickModel ? undefined : modelDraft };
+    const fingerprint = JSON.stringify([message, payload.attachments, images.map(file => [file.name, file.size, file.data.length]),
+      payload.plan, payload.modelSettings, steer]);
     const previous = pendingSend.current.get(selected);
     const requestId = previous?.fingerprint === fingerprint ? previous.requestId
       : Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -781,6 +804,10 @@ function App() {
     try {
       const result = await post(sessionUrl() + '/messages', { ...payload, requestId });
       pendingSend.current.delete(selected);
+      if (!steer) {
+        setModelDraft(undefined);
+        if (selection.current.sid === selected) sessionModels.refresh(false);
+      }
       drafts.current.delete(selected);
       if (selection.current.sid === selected) {
         clearMessage(); setImages([]);
@@ -889,9 +916,9 @@ function App() {
     {session && awayFromBottom && <button type="button" className="jump-latest" onClick={jumpToLatest} aria-label="回到最新消息" title="回到最新消息"><ChevronDown size={19}/>{newMessages && <span>有新消息</span>}</button>}</div>
     <ComposerDraft key={sid} drafts={drafts.current} sessionId={sid}>{(message, setMessage) => <div className="composer-wrap">{uploadProgress && <div className="notice" role="status">正在上传 {uploadProgress}，失败后重新选择文件可续传</div>}<form className="composer" onSubmit={e => send(e, message, () => setMessage(''), running)}>
     {images.length > 0 && <div className="image-attachments">{images.map((file,index) => <div className="image-attachment" key={index} title={`${file.name} · ${formatBytes(file.size)}`}>{file.image ? <img src={file.data} alt={`待发送图片 ${index+1}`}/> : <div className="file-attachment"><FileText size={22}/><span>{file.name}<small>{formatBytes(file.size)}</small></span></div>}<button type="button" aria-label={`移除${file.image ? '图片' : '附件'} ${index+1}`} disabled={busy} onClick={() => setImages(current => current.filter((_,i) => i !== index))}><X size={14}/></button></div>)}</div>}
-    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={waitingForAnswer ? '请先在问题卡片中回答' : session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy||waitingForAnswer} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected&&(!running||canSteer))send(e, message, () => setMessage(''), running)}}}/><div className="composer-bottom"><span>{status.capabilities?.plan && session ? <button type="button" className="mode-button" disabled={running || busy} aria-pressed={planMode === true} onClick={() => setPlanMode(value => !value)}>{planMode ? '计划模式' : '普通模式'}</button> : <><span className="dot"/> AI 助手</>}</span><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（支持分块上传和断点续传）" aria-label="添加文件" disabled={!session||busy||readingFiles||!canFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?(canSteer?'追加到当前任务':'等待当前任务完成'):'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles||waitingForAnswer||(running&&!canSteer)}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>所有登录用户共享当前执行端</span></div></div>}</ComposerDraft></main>
+    <textarea aria-label="发送消息" value={message} onChange={e => setMessage(e.target.value)} onPaste={pasteImages} placeholder={waitingForAnswer ? '请先在问题卡片中回答' : session ? '描述任务，或粘贴图片…' : '先创建一个项目和会话'} disabled={!session||busy||waitingForAnswer} onKeyDown={e => {if(!isMobile&&e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if((message.trim()||images.length)&&!busy&&connected&&(!running||canSteer))send(e, message, () => setMessage(''), running)}}}/><div className="composer-bottom"><div className="composer-settings">{status.capabilities?.plan && session ? <button type="button" className="mode-button" disabled={running || busy} aria-pressed={planMode === true} onClick={() => setPlanMode(value => !value)}>{planMode ? '计划模式' : '普通模式'}</button> : <><span className="dot"/> AI 助手</>}{canPickModel && session && <SessionModelPicker {...sessionModels} disabled={!connected || running || busy} value={modelDraft} onChange={setModelDraft}/>}</div><div><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(Array.from(e.target.files || [])); e.currentTarget.value = ''; }}/><button type="button" className="icon-button" title="添加文件（支持分块上传和断点续传）" aria-label="添加文件" disabled={!session||busy||readingFiles||!canFiles} onClick={() => fileInput.current?.click()}><Plus size={18}/></button><span className="enter-hint">{running?(canSteer?'追加到当前任务':'等待当前任务完成'):'Enter 发送 · Shift + Enter 换行'}</span>{running && <button type="button" className="stop-button" title="停止任务" aria-label="停止任务" onClick={stop}><Square size={14} fill="currentColor"/></button>}<button type="submit" className="send-button" aria-label={running?'追加要求':'发送消息'} disabled={(!message.trim()&&!images.length)||!session||!connected||busy||readingFiles||waitingForAnswer||(running&&!canSteer)}><ArrowUp size={18}/></button></div></div></form><div className="composer-note">AI 助手 可能会出错，请核对重要信息。<span>所有登录用户共享当前执行端</span></div></div>}</ComposerDraft></main>
     {filePanel && project && <aside className="file-panel" aria-label="项目文件" ref={isMobile ? drawer : undefined}><div className="file-header"><strong>项目文件</strong><div><button title="刷新文件" onClick={refreshFiles}><RefreshCw size={15}/></button><button title="关闭文件" onClick={() => setFilePanel(false)}><X size={17}/></button></div></div><div className="file-path"><button disabled={!filePath} onClick={() => setFilePath(filePath.split('/').slice(0,-1).join('/'))}><ArrowLeft size={14}/></button><span>{filePath || project.name}</span></div>{files.length===0 && <div className="file-empty"><FolderOpen size={30}/><p>文件夹是空的</p><span>AI 助手 生成的文件会出现在这里</span></div>}<div className="file-list">{files.map(file => {const relative=[filePath,file.name].filter(Boolean).join('/');return <div className="file-row" key={file.name}><button className="file-name" onClick={() => file.directory && setFilePath(relative)} title={file.name}>{file.directory?<Folder size={17}/>:<File size={17}/>}<span>{file.name}<small>{file.directory?'文件夹':formatBytes(file.size)}</small></span></button><div>{!file.directory && <a title="下载文件" aria-label={'下载 '+file.name} href={`/api/projects/${pid}/download?path=${encodeURIComponent(relative)}`}><Download size={15}/></a>}<button title={file.directory?'删除文件夹':'删除文件'} disabled={busy||running} aria-label={'删除 '+file.name} onClick={() => openDialog({type:'delete-file',title:file.directory?'删除文件夹':'删除文件',project,file,relative})}><Trash2 size={14}/></button></div></div>})}</div><div className="files-foot">仅显示当前项目的文件</div></aside>}
-    {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type==='archive-session' ? <p className="delete-warning">确定归档「{dialog.session?.name}」？会话将从共享列表移除，历史、目录和文件会保留。</p> : dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'将永久删除该项目下全部会话（含已归档会话及派生子会话），所有登录用户都会受到影响，历史无法恢复。目录和文件保留。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}{dialog.type==='project' ? <ProjectLocation request={api} onChange={setProjectLocation}/> : dialog.type==='session'&&!canRenameThread ? <p className="delete-warning">将在当前项目中创建新会话。当前桌面连接服务尚未支持自定义名称，更新后可修改名称。</p> : <label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:undefined} autoComplete={dialog.type==='password'?'new-password':'off'}/></label>}</>}{dialog.type==='project' && notice && <div className="notice">{notice}</div>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy||(dialog.type==='project'&&!projectLocation)}>{busy?'正在处理…':dialog.type==='archive-session'?'确认归档':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
+    {dialog && <div className="modal-backdrop" onMouseDown={e => {if(e.target===e.currentTarget&&!busy)setDialog(null)}}><section className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}><div className="modal-title"><h2>{dialog.title}</h2><button className="icon-button" onClick={() => setDialog(null)}><X size={18}/></button></div><form onSubmit={confirmDialog}>{dialog.type==='archive-session' ? <p className="delete-warning">确定归档「{dialog.session?.name}」？会话将从共享列表移除，历史、目录和文件会保留。</p> : dialog.type.startsWith('delete') ? <p className="delete-warning">确定删除「{dialog.file?.name || dialog.session?.name || dialog.project?.name}」？{dialog.type==='delete-project'?'将永久删除该项目下全部会话（含已归档会话及派生子会话），所有登录用户都会受到影响，历史无法恢复。目录和文件保留。':dialog.file?.directory?'将删除该文件夹及全部内容，无法恢复。':'此操作不可恢复。'}</p> : <>{dialog.type==='password' && <label>原密码<input type="password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} required autoComplete="current-password"/></label>}{dialog.type==='project' ? <ProjectLocation request={api} onChange={setProjectLocation}/> : dialog.type==='session'&&!canRenameThread ? <p className="delete-warning">将在当前项目中创建新会话。当前桌面连接服务尚未支持自定义名称，更新后可修改名称。</p> : <label>{dialog.type==='password'?'新密码':'名称'}<input autoFocus value={dialogValue} type={dialog.type==='password'?'password':'text'} onChange={e=>setDialogValue(e.target.value)} placeholder={dialog.type==='password'?'至少 8 个字符':'输入名称'} required minLength={dialog.type==='password'?8:1} maxLength={dialog.type==='password'?128:undefined} autoComplete={dialog.type==='password'?'new-password':'off'}/></label>}</>}{canPickModel && creatingSession && <NewSessionModelPicker {...creationModels} disabled={!connected || busy} value={newSessionModel} onChange={setNewSessionModel}/>}{dialog.type==='project' && notice && <div className="notice">{notice}</div>}{error && <div className="inline-error">{error}</div>}<div className="modal-buttons"><button type="button" className="secondary" onClick={()=>setDialog(null)}>取消</button><button className={dialog.type.startsWith('delete')?'danger':'primary'} disabled={busy||(dialog.type==='project'&&!projectLocation)}>{busy?'正在处理…':dialog.type==='archive-session'?'确认归档':dialog.type.startsWith('delete')?'确认删除':'确定'}</button></div></form></section></div>}
   </div>;
 }
 function ComposerDraft({ drafts, sessionId, children }: {

@@ -55,6 +55,8 @@ Web uses one MQTT interface for Docker and Windows desktop. Both bridges forward
 
 The first view loads 30 recent sessions and up to 50 history items for the selected session. Scroll up near the top to automatically load earlier messages, or jump back to the latest message. The browser subscribes to content for the selected session, fetches long command output on demand, and previews local reply images as thumbnails. Clicking an image opens an in-page viewer with zoom, panning, and mobile pinch-to-zoom. Images support project paths and absolute paths outside the project on the execution endpoint, including desktop bridge temporary images, and are read directly after login authentication. With a compatible execution endpoint, switch to Plan mode below the composer. Web renders synchronous and asynchronous questions as cards with choices, written answers, and skipping, and synchronizes pending questions across clients. With an execution endpoint that supports steering, you can send a reply to an asynchronous question while the task is running. When the session is idle, Web sends the reply as a new turn. Asynchronous question availability depends on the execution endpoint and model.
 
+Choose a model and reasoning effort in the composer, or choose a configured provider when creating a session. The OpenAI GPT catalog follows the execution endpoint. Self-hosted vLLM and llama.cpp connect through a compatible Responses API. [Model settings (Chinese)](web/README.md#模型与思考强度)
+
 Native Windows uses `mqtt://127.0.0.1:1883`. Containers reach the host through `mqtt://host.docker.internal:1883`. The startup script automatically reinstalls platform-specific dependencies when switching runtime platforms.
 
 ## Features and how it works
